@@ -1,5 +1,5 @@
 # Freshdesk REST service
-[![Build Status](https://travis-ci.org/sesam-community/freshdesk-rest.svg?branch=master)](https://travis-ci.org/sesam-community/freshdesk-rest)
+[![Build Status](https://travis-ci.org/egemenyavuz/freshdesk-rest.svg?branch=master)](https://travis-ci.org/egemenyavuz/freshdesk-rest)
 
 
 This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and [Freshdesk](https://developers.freshdesk.com/api/) integration as source or receiver system.
