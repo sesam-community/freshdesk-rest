@@ -4,9 +4,10 @@
 
 This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and [Freshdesk](https://developers.freshdesk.com/api/) integration as source or receiver system.
 
-Implemented Features
+### Implemented Features:
 * pagination
-* continuation support (i.e. [Sesam's JSON Pull Protocol] (https://docs.sesam.io/json-pull.html)  )
+* continuation support (i.e. [Sesam's JSON Pull Protocol](https://docs.sesam.io/json-pull.html)  )
+* rate-limit handling
 * GET, PUT, POST, DELETE requests
 
 
