@@ -1,128 +1,93 @@
-# CVpartner REST service
-[![Build Status](https://travis-ci.org/sesam-community/cvpartner-rest.svg?branch=master)](https://travis-ci.org/sesam-community/cvpartner-rest)
-
-A small microservice to get entities from a REST api.
-
-This microservice needs information about path to the url of the next page (more in example config).
+# Freshdesk REST service
+[![Build Status](https://travis-ci.org/sesam-community/freshdesk-rest.svg?branch=master)](https://travis-ci.org/sesam-community/freshdesk-rest)
 
 
-##### RETURNED example paged-entity
-```
-[
-    {
-        "id":"2",
-        "foo": "bar"
-    },
-    {
-        "id":"3",
-        "foo": "baz"
-    }
-]
-```
+This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and [Freshdesk](https://developers.freshdesk.com/api/) integration as source or receiver system.
 
-##### GET example paged-entity - pipe config
-```
-[
-    "_id": "cvpartner-users",
-    "type": "pipe",
-    "source": {
-        "type": "json",
-        "system": "cvpartner",
-        "url": "/users"
-    }
-]
-```
+Implemented Features
+* pagination
+* continuation support (i.e. [Sesam's JSON Pull Protocol] (https://docs.sesam.io/json-pull.html)  )
+* GET, PUT, POST, DELETE requests
 
 
-##### Example result from GET method
+
+
+### Running locally in a virtual environment
 ```
-{
-  "href": "http://foo.com/api/v1/users",
-    "values": [
-    {
-      "id": "1",
-      "cv_id": "2",
-      "name": "Ashkan",
-      "custom_tags": [
-        "595a082e77fe09263b7fea20",
-        "5954f44d3a4e6107feaea292",
-        "5954f4a159264807599b31c2"
-      ],
-      "skills": [
-        "58f756f4502bdb084adaddb4",
-        "58f7785b502bdb07f8dade23",
-        "594447d938cf5f0ab3315a98",
-        "59aea857aca9200810994931"
-      ],
-      "customers": [
-        "5825b3072c04d6206f27f005"
-      ],
-      "industries": []
-    }
-  ],
-  "total": 2262,
-  "next": {
-    "href": "http://foo.com/api/v1/users?limit=100&offset=100"
-  }
-}
+  export freshdesk_domain="<freshdesk_domain>"
+  export freshdesk_apikey="<freshdesk_apikey>"
+
+  cd freshdesk-rest/service
+  virtualenv --python=python3 venv
+  . venv/bin/activate
+  pip install -r requirements.txt
+
+  python freshdesk.py
+   * Running on http://0.0.0.0:5000/ (Press CTRL+C to quit)
+   * Restarting with stat
+   * Debugger is active!
+   * Debugger pin code: 260-787-156
 ```
-This will result into returned entities:
+
+The service listens on port 5000 on localhost.
+### Example calls
+
+##### GET
 ```
-[
-    {
-      "id": "1",
-      "cv_id": "2",
-      "name": "Ashkan",
-      "custom_tags": [
-        "595a082e77fe09263b7fea20",
-        "5954f44d3a4e6107feaea292",
-        "5954f4a159264807599b31c2"
-      ],
-      "skills": [
-        "58f756f4502bdb084adaddb4",
-        "58f7785b502bdb07f8dade23",
-        "594447d938cf5f0ab3315a98",
-        "59aea857aca9200810994931"
-      ],
-      "customers": [
-        "5825b3072c04d6206f27f005"
-      ],
-      "industries": []
-    }
-]
+curl -G http://localhost:5000/contacts --data-urlencode "page=1" --data-urlencode "limit=75"
+curl -G http://localhost:5000/contacts --data-urlencode "limit=75"
+curl -G http://localhost:5000/search/contacts --data-urlencode "query=\"updated_at:>'2017-12-01' AND updated_at:<'2018-03-01'\""
+curl -G http://localhost:5000/companies/[company_id]
+curl -G http://localhost:5000/tickets --data-urlencode "since=2018-04-30"
+curl -G http://localhost:5000/surveys
+curl -G http://localhost:5000/surveys/satisfaction_ratings --data-urlencode "since=2017-12-12"
+curl -G http://localhost:5000/roles
+curl -G http://localhost:5000/groups
+curl -G http://localhost:5000/agents
+curl -G http://localhost:5000/ticket_fields
+curl -G http://localhost:5000/contact_fields
+```
+####### POST
+```
+curl -X POST  http://localhost:5000/contacts -H 'Content-Type: application/json' -d '[json data]'
+curl -X POST  http://localhost:5000/companies -H 'Content-Type: application/json' -d '[json data]'
+curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
+
+curl -X POST  http://localhost:5000/tickets -H 'Content-Type: application/json' -d '[json data]'
+curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
+curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
+```
+####### POST
+```
+curl -X PUT  http://localhost:5000/companies/[company_id] -H 'Content-Type: application/json' -d '[json data]'
+curl -X PUT  http://localhost:5000/contacts/[contact_id] -H 'Content-Type: application/json' -d '{"description": "Test company"}'
+```
+####### POST
+```
+
+```
+####### POST
+```
+curl -X DELETE  http://localhost:5000/companies/[company_id]
+curl -X DELETE  http://localhost:5000/conversations/[company_id]
 ```
 
 
-##### POST example paged-entity - pipe config
-```
-[
-    {
-        "_id": "foo",
-        "post_url": "v3/cvs/:user_id/:cv_id"
-    }
-]
-```
+##### configuration items:
+| CONFIG_NAME        | DESCRIPTION           | IS_REQUIRED  |DEFAULT_VALUE|
+| -------------------|:---------------------:|:------------:|:-----------:|
+| freshdesk_domain | Freshdesk domain  | yes | n/a |
+| freshdesk_api_path | path for API | no | /api/v2/ |
+| freshdesk_filter_call_max_page_size | Maximum allowed number of entities in a filter call | no | 30 |
+| freshdesk_filter_call_max_page_no | Maximum allowed number of pages in a filter call | no | 10 |
+| freshdesk_apikey | Freshdesk apikey | yes | n/a |
+| loging_level | Numerical value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | 20 |
+| headers | Request headers for freshdesk API calls | no | {'Content-Type':'application/json'} |
+| properties_to_anonymize_per_uri_template | Dictionary where key are API calls URI template and values are list of object properties to be anonymized | no | {} |
+| anonymization_string | the string value used for anonymization of values | no | * |
 
-Use http_transform to get data from service that has special urls
-
-##### Example configuration:
+##### example configuration in SESAM:
 
 ```
-{
-  "_id": "cvpartner",
-  "type": "system:microservice",
-  "docker": {
-    "environment": {
-      "base_url": "https://some-rest-service.com/v1/",
-      "next_page": "next.href",
-      "entities_path": "values", #in which property your entities reside in the result from GET
-      "headers": "{'Accept':'application/json', 'Authorization':'$SECRET(token)'}",
-      "sleep": "0.400", #sleep for 400 miliseconds between each rest call
-      "post_url": "post_url" #the property that contains the url to call
-    },
-    "image": "sesamcommunity/cvpartner-rest:latest",
-    "port": 5000
-  }
-}
+TBD
 ```
-

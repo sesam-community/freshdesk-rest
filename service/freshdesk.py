@@ -14,7 +14,7 @@ logger = logging.getLogger('freshdesk-rest-service')
 stdout_handler = logging.StreamHandler()
 stdout_handler.setFormatter(logging.Formatter(format_string))
 logger.addHandler(stdout_handler)
-logger.setLevel(os.getenv("loging_level", logging.DEBUG))
+logger.setLevel(os.getenv("loging_level", logging.INFO))
 
 FRESHDESK_DOMAIN = os.getenv("freshdesk_domain")
 FRESHDESK_API_PATH = os.getenv("freshdesk_api_path", "/api/v2/")
@@ -29,7 +29,8 @@ FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
 PAGE_SIZE = int(os.getenv("page_size", 100))
 
 BLACKLIST_SINCE_SUPPORT = ["surveys"]
-BLACKLIST_PROPERTY_PER_PATH_CATEGORY = {}
+PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get('properties_to_anonymize_per_uri_template', "{}").replace("'","\""))
+ANONYMIZATION_STRING = os.environ.get('anonymization_string', "*")
 VALID_RESPONSE_COMBOS = [("GET", 200), ("POST", 201),
                          ("PUT", 200), ("DELETE", 204)]
 
@@ -46,8 +47,11 @@ def get_freshdesk_req_params(path, service_params):
     freshdesk_req_params = service_params
     since_parameter_mapping = {"tickets": "updated_since",
                                 "surveys/satisfaction_ratings": "created_since"}
-    if "search" not in get_uri_template(path):
-        freshdesk_req_params.setdefault("per_page", PAGE_SIZE)
+    if "search/" not in get_uri_template(path):
+        freshdesk_req_params.setdefault("per_page", service_params.get("limit", PAGE_SIZE))
+
+    if "limit" in freshdesk_req_params:
+        del freshdesk_req_params["limit"]
 
     if service_params.get("since") is not None:
         if freshdesk_req_params.get("query", None) is not None:
@@ -77,7 +81,7 @@ def call_service(url, params, json):
 
     return freshdesk_response
 
-
+# fetches data for any GET request, supports pagination,
 def fetch_data(path, freshdesk_req_params):
     base_url = FRESHDESK_URL_ROOT + path
     page_counter = 0
@@ -123,11 +127,11 @@ def fetch_data(path, freshdesk_req_params):
                     entity["_updated"] = entity["updated_at"]
                     data_to_return.append(entity)
 
-    if uri_template in BLACKLIST_PROPERTY_PER_PATH_CATEGORY:
-        blacklist_fields = BLACKLIST_PROPERTY_PER_PATH_CATEGORY[uri_template]
+    if uri_template in PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE:
+        fields_to_anonymize = PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE[uri_template]
         for entity in data_from_freshdesk:
-            for prop in blacklist_fields:
-                entity[prop] = "*"
+            for prop in fields_to_anonymize:
+                entity[prop] = ANONYMIZATION_STRING
 
     # for sub objects, it is only page size that should be sent
     freshdesk_req_params = {"per_page": 100}
