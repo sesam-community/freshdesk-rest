@@ -47,7 +47,7 @@ curl -G http://localhost:5000/agents
 curl -G http://localhost:5000/ticket_fields
 curl -G http://localhost:5000/contact_fields
 ```
-####### POST
+##### POST
 ```
 curl -X POST  http://localhost:5000/contacts -H 'Content-Type: application/json' -d '[json data]'
 curl -X POST  http://localhost:5000/companies -H 'Content-Type: application/json' -d '[json data]'
@@ -57,16 +57,13 @@ curl -X POST  http://localhost:5000/tickets -H 'Content-Type: application/json' 
 curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
 curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
 ```
-####### POST
+#####  PUT
 ```
 curl -X PUT  http://localhost:5000/companies/[company_id] -H 'Content-Type: application/json' -d '[json data]'
 curl -X PUT  http://localhost:5000/contacts/[contact_id] -H 'Content-Type: application/json' -d '{"description": "Test company"}'
 ```
-####### POST
-```
 
-```
-####### POST
+##### DELETE
 ```
 curl -X DELETE  http://localhost:5000/companies/[company_id]
 curl -X DELETE  http://localhost:5000/conversations/[company_id]
