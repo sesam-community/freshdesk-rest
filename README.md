@@ -94,5 +94,18 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
 ##### example configuration in SESAM:
 
 ```
-TBD
+{
+  "_id": "freshdesk-rest-proxy",
+  "type": "system:microservice",
+  "docker": {
+    "environment": {
+      "freshdesk_apikey": "$SECRET(freshdesk-apikey)",
+      "freshdesk_domain": "$ENV(freshdesk-domain)"
+      "logging_level": "INFO"
+    },
+    "image": "sesamcommunity/freshdesk-rest:latest",
+    "port": 5000
+  }
+}
+
 ```
