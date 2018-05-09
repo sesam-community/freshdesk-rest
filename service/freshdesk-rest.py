@@ -14,7 +14,7 @@ logger = logging.getLogger('freshdesk-rest-service')
 stdout_handler = logging.StreamHandler()
 stdout_handler.setFormatter(logging.Formatter(format_string))
 logger.addHandler(stdout_handler)
-logger.setLevel(os.getenv("loging_level", logging.INFO))
+logger.setLevel(os.getenv("logging_level", logging.WARNING))
 
 FRESHDESK_DOMAIN = os.getenv("freshdesk_domain")
 FRESHDESK_API_PATH = os.getenv("freshdesk_api_path", "/api/v2/")
@@ -28,8 +28,9 @@ FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
 
 PAGE_SIZE = int(os.getenv("page_size", 100))
 
-BLACKLIST_SINCE_SUPPORT = ["surveys"]
-PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get('properties_to_anonymize_per_uri_template', "{}").replace("'","\""))
+BLACKLIST_UPDATED_TOKEN_GENERATION = ["surveys"]
+PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get(
+    'properties_to_anonymize_per_uri_template', "{}").replace("'", "\""))
 ANONYMIZATION_STRING = os.environ.get('anonymization_string', "*")
 VALID_RESPONSE_COMBOS = [("GET", 200), ("POST", 201),
                          ("PUT", 200), ("DELETE", 204)]
@@ -38,31 +39,47 @@ VALID_RESPONSE_COMBOS = [("GET", 200), ("POST", 201),
 def get_uri_template(path):
     return re.sub(r"\d+", r"_id_", path)
 
-#Sesam Json Pull Protocol is transformed to Freshdesk API headers
-#Freshdesk rules:
+# Sesam Json Pull Protocol is transformed to Freshdesk API headers
+# Freshdesk rules:
 #   max page size is 30 for "search" calls, 100 otherwise
 #   "search" calls accepts only following params: query, per_page, page
 
+
 def get_freshdesk_req_params(path, service_params):
     freshdesk_req_params = service_params
-    since_parameter_mapping = {"tickets": "updated_since",
-                                "surveys/satisfaction_ratings": "created_since"}
-    if "search/" not in get_uri_template(path):
-        freshdesk_req_params.setdefault("per_page", service_params.get("limit", PAGE_SIZE))
+    since_support_config = {
+        'tickets': {'param': 'updated_since', 'operator': '='},
+        'surveys/satisfaction_ratings': {'param': 'created_since',
+                'operator': '='},
+        'search/companies': {'param': 'updated_at', 'operator': ':>'},
+        'search/contacts': {'param': 'updated_at', 'operator': ':>'}
+        }
+
+    uri_template = get_uri_template(path)
+    if "search/" not in uri_template:
+        freshdesk_req_params.setdefault(
+            "per_page", service_params.get("limit", PAGE_SIZE))
 
     if "limit" in freshdesk_req_params:
         del freshdesk_req_params["limit"]
 
-    if service_params.get("since") is not None:
-        if freshdesk_req_params.get("query", None) is not None:
-            freshdesk_req_params["query"] = "(" + service_params.get(
-                "query") + ") AND " + freshdesk_req_params["query"]
-        elif path in since_parameter_mapping:
-            freshdesk_req_params[since_parameter_mapping[path]
-                                 ] = service_params.get("since")
+    if service_params.get("since") is not None and uri_template in since_support_config:
+        if "search/" in uri_template:
+            since_query_segment = since_support_config[uri_template]["param"] + since_support_config[uri_template]["operator"] + "'" + re.sub(
+                r"T.*", r"", freshdesk_req_params["since"]) + "'"
+            if freshdesk_req_params.get("query", None) is not None:
+                freshdesk_req_params["query"] = "\"(" + service_params.get(
+                    "query").replace("\"", "") + ") AND " + since_query_segment + "\""
+            else:
+                freshdesk_req_params["query"] = "\"" + \
+                    since_query_segment + "\""
+        else:
+            freshdesk_req_params[since_support_config[uri_template]
+                                 ["param"]] = service_params.get("since")
         del freshdesk_req_params["since"]
 
     return freshdesk_req_params
+
 
 def call_service(url, params, json):
     logger.info("Issuing a %s call with url=%s, with param list=%s, headers=%s",
@@ -76,12 +93,13 @@ def call_service(url, params, json):
         logger.error("sleeping for %s seconds", retry_after)
         sleep(float(retry_after))
     elif (request.method, freshdesk_response.status_code) not in VALID_RESPONSE_COMBOS:
-        logger.warn("Unexpected response status code=%d, request-ID=%s, response text=%s" %
-                    (freshdesk_response.status_code, freshdesk_response.headers.get('X-Request-Id'), freshdesk_response.text))
+        logger.error("Unexpected response status code=%d, request-ID=%s, response text=%s" %
+                     (freshdesk_response.status_code, freshdesk_response.headers.get('X-Request-Id'), freshdesk_response.text))
 
     return freshdesk_response
 
-# fetches data for any GET request, supports pagination,
+
+# fetches data for any GET request, supports pagination
 def fetch_data(path, freshdesk_req_params):
     base_url = FRESHDESK_URL_ROOT + path
     page_counter = 0
@@ -96,14 +114,14 @@ def fetch_data(path, freshdesk_req_params):
         if freshdesk_response.status_code != 200:
             return freshdesk_response.text, freshdesk_response.status_code
         response_json = freshdesk_response.json()
-        #search calls return entites in "results" property
+        # search calls return entites in "results" property
         if "search/" in uri_template:
             data_from_freshdesk = response_json.get("results")
             total_object_count = response_json.get("total")
             if page_counter == FRESHDESK_FILTER_CALL_MAX_PAGE_NO:
                 logger.error("MAX page number reached before fetching all objects: total_object_count=%s, FRESHDESK_FILTER_CALL_MAX_PAGE_NO=%s, page_counter=%s" % (
                     total_object_count, FRESHDESK_FILTER_CALL_MAX_PAGE_NO, page_counter))
-                return { "message" : "MAX page number reached before fetching all objects"}, 500
+                return {"message": "MAX page number reached before fetching all objects"}, 500
             if total_object_count > page_counter * FRESHDESK_FILTER_CALL_MAX_PAGE_SIZE:
                 freshdesk_req_params["page"] = page_counter + 1
             else:
@@ -117,11 +135,11 @@ def fetch_data(path, freshdesk_req_params):
                 base_url_next_page = None
         if isinstance(data_from_freshdesk, dict):
             data_to_return = data_from_freshdesk
-            if path not in BLACKLIST_SINCE_SUPPORT:
+            if path not in BLACKLIST_UPDATED_TOKEN_GENERATION:
                 data_to_return["_updated"] = data_to_return["updated_at"]
         elif isinstance(data_from_freshdesk, list):
-            if path in BLACKLIST_SINCE_SUPPORT:
-                data_to_return.append(data_from_freshdesk)
+            if path in BLACKLIST_UPDATED_TOKEN_GENERATION:
+                data_to_return.extend(data_from_freshdesk)
             else:
                 for entity in data_from_freshdesk:
                     entity["_updated"] = entity["updated_at"]
@@ -150,6 +168,9 @@ def fetch_data(path, freshdesk_req_params):
                 "tickets/" + str(entity["id"]) + "/conversations", freshdesk_req_params)
             entity["time_entries"], response_code = fetch_data(
                 "tickets/" + str(entity["id"]) + "/time_entries", freshdesk_req_params)
+
+    logger.debug("returning %s entities" % len(data_to_return))
+
     return data_to_return, 200
 
 
