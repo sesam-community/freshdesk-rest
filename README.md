@@ -9,9 +9,12 @@ This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and 
 * continuation support (i.e. [Sesam's JSON Pull Protocol](https://docs.sesam.io/json-pull.html)  )
 * rate-limit handling
 * GET, PUT, POST, DELETE requests
+* anonymization of fields
 
 
-
+Limitations
+* continuation(i.e. Sesam's _since_ parameter) is supported only for date/datetime values. This should suffice for Freshdesk data model.
+* [attachments](https://developers.freshdesk.com/api/#attachments) are not supported
 
 ### Running locally in a virtual environment
 ```
@@ -23,7 +26,7 @@ This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and 
   . venv/bin/activate
   pip install -r requirements.txt
 
-  python freshdesk.py
+  python freshdesk-rest.py
    * Running on http://0.0.0.0:5000/ (Press CTRL+C to quit)
    * Restarting with stat
    * Debugger is active!
@@ -47,6 +50,11 @@ curl -G http://localhost:5000/groups
 curl -G http://localhost:5000/agents
 curl -G http://localhost:5000/ticket_fields
 curl -G http://localhost:5000/contact_fields
+
+curl -G http://localhost:5000/search/contacts --data-urlencode "since=2017-12-01"
+curl -G http://localhost:5000/search/contacts --data-urlencode "since=2017-12-01" --data-urlencode "query=\"updated_at:<'2018-03-01'\""
+curl -G http://localhost:5000/search/contacts --data-urlencode "query=\"updated_at:<'2018-03-01'\""
+curl -G http://localhost:5000/tickets --data-urlencode "since=2018-12-01"
 ```
 ##### POST
 ```
@@ -79,8 +87,7 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
 | freshdesk_filter_call_max_page_size | Maximum allowed number of entities in a filter call | no | 30 |
 | freshdesk_filter_call_max_page_no | Maximum allowed number of pages in a filter call | no | 10 |
 | freshdesk_apikey | Freshdesk apikey | yes | n/a |
-| loging_level | Numerical value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | 20 |
-| headers | Request headers for freshdesk API calls | no | {'Content-Type':'application/json'} |
+| logging_level | Level value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | WARNING |
 | properties_to_anonymize_per_uri_template | Dictionary where key are API calls URI template and values are list of object properties to be anonymized | no | {} |
 | anonymization_string | the string value used for anonymization of values | no | * |
 
