@@ -10,6 +10,7 @@ This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and 
 * rate-limit handling
 * GET, PUT, POST, DELETE requests
 * anonymization of fields
+* _id property generation in GET requests
 
 
 Limitations
@@ -90,6 +91,7 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
 | logging_level | Level value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | WARNING |
 | properties_to_anonymize_per_uri_template | Dictionary where key are API calls URI template and values are list of object properties to be anonymized | no | {} |
 | anonymization_string | the string value used for anonymization of values | no | * |
+|generate_sesam_id | Flag to control the generation of _id property. Set "False" to get entities without _id field populated, any other value otherwise | no | True |
 
 ##### example configuration in SESAM:
 
@@ -109,4 +111,3 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
 }
 
 ```
- 

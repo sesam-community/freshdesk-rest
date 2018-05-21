@@ -4,6 +4,7 @@ import requests
 import logging
 import json
 import re
+import sys
 from time import sleep
 
 app = Flask(__name__)
@@ -27,6 +28,7 @@ FRESHDESK_HEADERS = {'Content-Type': 'application/json'}
 FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
 
 PAGE_SIZE = int(os.getenv("page_size", 100))
+DO_GENERATE_SESAM_ID = bool(os.getenv("generate_sesam_id", "True") != "False")
 
 BLACKLIST_UPDATED_TOKEN_GENERATION = ["surveys"]
 PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get(
@@ -35,6 +37,10 @@ ANONYMIZATION_STRING = os.environ.get('anonymization_string', "*")
 VALID_RESPONSE_COMBOS = [("GET", 200), ("POST", 201),
                          ("PUT", 200), ("DELETE", 204)]
 
+required_vars = [ FRESHDESK_DOMAIN, FRESHDESK_APIKEY]
+for var in required_vars:
+    if var is None or not var:
+        raise SystemExit("Freshdesk-rest service cannot be started:Not all mandatory variables are initialized")
 
 def get_uri_template(path):
     return re.sub(r"\d+", r"_id_", path)
@@ -135,9 +141,14 @@ def fetch_data(path, freshdesk_req_params):
                 base_url_next_page = None
         if isinstance(data_from_freshdesk, dict):
             data_to_return = data_from_freshdesk
+            if DO_GENERATE_SESAM_ID:
+                data_to_return["_id"] = str(data_to_return["id"])
             if path not in BLACKLIST_UPDATED_TOKEN_GENERATION:
                 data_to_return["_updated"] = data_to_return["updated_at"]
         elif isinstance(data_from_freshdesk, list):
+            if DO_GENERATE_SESAM_ID:
+                for entity in data_from_freshdesk:
+                    entity["_id"] = str(entity["id"])
             if path in BLACKLIST_UPDATED_TOKEN_GENERATION:
                 data_to_return.extend(data_from_freshdesk)
             else:
