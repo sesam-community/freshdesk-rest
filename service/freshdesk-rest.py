@@ -49,6 +49,7 @@ def get_freshdesk_req_params(path, service_params):
     freshdesk_req_params = service_params
     since_support_config = {
         'tickets': {'param': 'updated_since', 'operator': '='},
+        'contacts': {'param': '_updated_since', 'operator': '='},
         'surveys/satisfaction_ratings': {'param': 'created_since',
                 'operator': '='},
         'search/companies': {'param': 'updated_at', 'operator': ':>'},
