@@ -26,11 +26,14 @@ FRESHDESK_FILTER_CALL_MAX_PAGE_NO = int(
 FRESHDESK_APIKEY = os.getenv('freshdesk_apikey')
 FRESHDESK_HEADERS = {'Content-Type': 'application/json'}
 FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
+SESAM_URL=os.getenv("sesam_url", None)
+SESAM_JWT=os.getenv("sesam_jwt", None)
 
 PAGE_SIZE = int(os.getenv("page_size", 100))
 DO_GENERATE_SESAM_ID = bool(os.getenv("generate_sesam_id", "True") != "False")
 
 BLACKLIST_UPDATED_TOKEN_GENERATION = ["surveys"]
+SESAM_CALLBACK_CONFIG = {'companies' : {'dataset_id':'freshdesk-company'}, 'companies/_id_' : {'dataset_id':'freshdesk-company'}}
 PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get(
     'properties_to_anonymize_per_uri_template', "{}").replace("'", "\""))
 ANONYMIZATION_STRING = os.environ.get('anonymization_string', "*")
@@ -43,7 +46,54 @@ for var in required_vars:
         raise SystemExit("Freshdesk-rest service cannot be started:Not all mandatory variables are initialized")
 
 def get_uri_template(path):
-    return re.sub(r"\d+", r"_id_", path)
+    return re.sub(r"\d+", r"_id_", path), re.sub(r"[a-zA-Z\/]+", r"", path)
+
+def to_sesam_entity(in_dict, path, ni):
+    def add_ni(mydict, ni):
+        if not ni:
+            return mydict
+        namespaced_entity = {}
+        for key, value in mydict.items():
+            if '_id' == key:
+                namespaced_entity[key] = ni + ':' + value
+            elif key in ['_updated', '_ts', '_hash','_previous', '_deleted']:
+                namespaced_entity[key] = value
+            else:
+                if type(value) is dict:
+                    namespaced_entity[ni + ':' + key] = add_ni(value, ni)
+                else:
+                    namespaced_entity[ni + ':' + key] = value
+        return namespaced_entity
+
+    if DO_GENERATE_SESAM_ID:
+        in_dict['_id'] = str(in_dict['id'])
+    if path not in BLACKLIST_UPDATED_TOKEN_GENERATION:
+        in_dict['_updated'] = str(in_dict['updated_at'])
+
+    return add_ni(in_dict, ni)
+
+def sesam_callback(method, callback_config, resource_id, json_data, uri_template):
+    if not SESAM_URL or not SESAM_JWT:
+        return
+    base_url = SESAM_URL + '/api/datasets/'  + callback_config['dataset_id']
+    headers = {'Authorization':'bearer ' + SESAM_JWT, 'Accept': 'application/problem+json', 'content-type' : 'application/json' }
+    entity_to_post = {}
+    if method == 'DELETE':
+        _id = callback_config['dataset_id'] + ':' + resource_id
+        params = {'entity_id' : _id}
+        logger.debug('issuing a call url=%s, params=%s' % (base_url + '/entity', params))
+        sesam_response = requests.get(url=base_url + '/entity', headers=headers, params=params)
+        if sesam_response.status_code != 200:
+            logger.warn('cannot fetch \'%s\' from dataset \'%s\' to delete: %s' % (_id, callback_config['dataset_id'], sesam_response.text))
+        else:
+            entity_to_post = sesam_response.json()
+            entity_to_post['_deleted'] = True
+    else:
+        entity_to_post = to_sesam_entity(json_data, uri_template, callback_config['dataset_id'])
+    if entity_to_post:
+        sesam_response = requests.post(url=base_url + '/entities', headers=headers, json=entity_to_post)
+        if sesam_response.status_code != 200:
+            logger.warn('cannot post entity \'%s\' to dataset \'%s\' : %s' % (_id, callback_config['dataset_id'], sesam_response.text))
 
 # Sesam Json Pull Protocol is transformed to Freshdesk API headers
 # Freshdesk rules:
@@ -62,7 +112,7 @@ def get_freshdesk_req_params(path, service_params):
         'search/contacts': {'param': 'updated_at', 'operator': ':>'}
         }
 
-    uri_template = get_uri_template(path)
+    uri_template, freshdesk_resource_id = get_uri_template(path)
     if "search/" not in uri_template:
         freshdesk_req_params.setdefault(
             "per_page", service_params.get("limit", PAGE_SIZE))
@@ -87,7 +137,6 @@ def get_freshdesk_req_params(path, service_params):
 
     return freshdesk_req_params
 
-
 def call_service(url, params, json):
     logger.info("Issuing a %s call with url=%s, with param list=%s, headers=%s",
                 request.method, url, params, FRESHDESK_HEADERS)
@@ -102,7 +151,13 @@ def call_service(url, params, json):
     elif (request.method, freshdesk_response.status_code) not in VALID_RESPONSE_COMBOS:
         logger.error("Unexpected response status code=%d, request-ID=%s, response text=%s" %
                      (freshdesk_response.status_code, freshdesk_response.headers.get('X-Request-Id'), freshdesk_response.text))
-
+    elif request.method in ['PUT', 'POST', 'DELETE']:
+        uri_template, freshdesk_resource_id = get_uri_template(url.replace(FRESHDESK_URL_ROOT,  ''))
+        json_data = {}
+        if request.method != 'DELETE':
+            json_data = freshdesk_response.json()
+        if uri_template in SESAM_CALLBACK_CONFIG:
+             sesam_callback(request.method, SESAM_CALLBACK_CONFIG[uri_template], freshdesk_resource_id, json_data, uri_template)
     return freshdesk_response
 
 
@@ -113,7 +168,7 @@ def fetch_data(path, freshdesk_req_params):
 
     data_to_return = []
     base_url_next_page = base_url
-    uri_template = get_uri_template(path)
+    uri_template, freshdesk_resource_id = get_uri_template(path)
     while base_url_next_page is not None:
         page_counter += 1
         freshdesk_response = call_service(
@@ -141,21 +196,10 @@ def fetch_data(path, freshdesk_req_params):
             else:
                 base_url_next_page = None
         if isinstance(data_from_freshdesk, dict):
-            data_to_return = data_from_freshdesk
-            if DO_GENERATE_SESAM_ID:
-                data_to_return["_id"] = str(data_to_return["id"])
-            if path not in BLACKLIST_UPDATED_TOKEN_GENERATION:
-                data_to_return["_updated"] = data_to_return["updated_at"]
+            data_to_return = to_sesam_entity(data_from_freshdesk, uri_template, None)
         elif isinstance(data_from_freshdesk, list):
-            if DO_GENERATE_SESAM_ID:
-                for entity in data_from_freshdesk:
-                    entity["_id"] = str(entity["id"])
-            if path in BLACKLIST_UPDATED_TOKEN_GENERATION:
-                data_to_return.extend(data_from_freshdesk)
-            else:
-                for entity in data_from_freshdesk:
-                    entity["_updated"] = entity["updated_at"]
-                    data_to_return.append(entity)
+            for entity in data_from_freshdesk:
+                data_to_return.append(to_sesam_entity(entity, uri_template, None))
 
     if uri_template in PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE:
         fields_to_anonymize = PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE[uri_template]
@@ -195,9 +239,8 @@ def get(path):
 
 
 @app.route("/<path:path>", methods=["POST", "PUT", "DELETE"])
-def post(path):
+def push(path):
     base_url = FRESHDESK_URL_ROOT + path
-
     freshdesk_req_params = get_freshdesk_req_params(
         base_url, request.args.to_dict(True))
     freshdesk_response = call_service(
