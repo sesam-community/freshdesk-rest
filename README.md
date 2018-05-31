@@ -11,6 +11,7 @@ This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and 
 * GET, PUT, POST, DELETE requests
 * anonymization of fields
 * _id property generation in GET requests
+* optional sesam callback feature for PUT/POST/DELETE requests. requires both _sesam_url_ and _sesam_node_ to be set
 
 
 Limitations
@@ -66,6 +67,9 @@ curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: 
 curl -X POST  http://localhost:5000/tickets -H 'Content-Type: application/json' -d '[json data]'
 curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
 curl -X POST  http://localhost:5000/tickets/[ticket_id]/reply -H 'Content-Type: application/json' -d '[json data]'
+
+curl -X POST  http://localhost:5000/companies -H 'Content-Type: application/json' -d '{"name": "c", "custom_fields": {"customer_code": "123456"}}'
+
 ```
 #####  PUT
 ```
@@ -92,6 +96,9 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
 | properties_to_anonymize_per_uri_template | Dictionary where key are API calls URI template and values are list of object properties to be anonymized | no | {} |
 | anonymization_string | the string value used for anonymization of values | no | * |
 |generate_sesam_id | Flag to control the generation of _id property. Set "False" to get entities without _id field populated, any other value otherwise | no | True |
+| sesam_url | sesam url e.g. _https://datahub-1426e5f8.sesam.cloud_  | no | n/a |
+| sesam_jwt | sesam_jwt for the sesam node | no | n/a |
+
 
 ##### example configuration in SESAM:
 
