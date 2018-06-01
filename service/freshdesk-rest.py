@@ -33,7 +33,24 @@ PAGE_SIZE = int(os.getenv("page_size", 100))
 DO_GENERATE_SESAM_ID = bool(os.getenv("generate_sesam_id", "True") != "False")
 
 BLACKLIST_UPDATED_TOKEN_GENERATION = ["surveys"]
-SESAM_CALLBACK_CONFIG = {'companies' : {'dataset_id':'freshdesk-company'}, 'companies/_id_' : {'dataset_id':'freshdesk-company'}}
+SESAM_CALLBACK_CONFIG = {
+  'companies': {
+    'dataset_id': 'freshdesk-company',
+    'ni_config': {
+      'from_property': 'custom_fields.customer_code',
+      'to_property': 'customer_code-ni',
+      'ni': 'global-customer'
+    }
+  },
+  'companies/_id_': {
+    'dataset_id': 'freshdesk-company',
+    'ni_config': {
+      'from_property': 'custom_fields.customer_code',
+      'to_property': 'customer_code-ni',
+      'ni': 'global-customer'
+    }
+  }
+}
 PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get(
     'properties_to_anonymize_per_uri_template', "{}").replace("'", "\""))
 ANONYMIZATION_STRING = os.environ.get('anonymization_string', "*")
@@ -48,7 +65,15 @@ for var in required_vars:
 def get_uri_template(path):
     return re.sub(r"\d+", r"_id_", path), re.sub(r"[a-zA-Z\/]+", r"", path)
 
-def to_sesam_entity(in_dict, path, ni):
+def to_sesam_entity(in_dict, path, ni, method):
+    def get_prop_value(key_path, entity):
+        if len(key_path) == 1:
+            val = entity[key_path[-1]]
+            if type(val) in [int, float, bool, str]:
+                return val
+        else:
+            return get_prop_value(key_path[1:], entity[key_path[0]])
+
     def add_ni(mydict, ni):
         if not ni:
             return mydict
@@ -69,6 +94,11 @@ def to_sesam_entity(in_dict, path, ni):
         in_dict['_id'] = str(in_dict['id'])
     if path not in BLACKLIST_UPDATED_TOKEN_GENERATION:
         in_dict['_updated'] = str(in_dict['updated_at'])
+    if method in ['PUT', 'POST', 'DELETE'] and re.match(r'^companies', path) and in_dict['custom_fields']['customer_code']:
+        ni_config = SESAM_CALLBACK_CONFIG[path]['ni_config']
+        from_property = ni_config['from_property']
+        val = get_prop_value(from_property.split('.'), in_dict)
+        in_dict[ni_config['to_property']] = '~:' + ni_config['ni'] + ':' + val
 
     return add_ni(in_dict, ni)
 
@@ -81,7 +111,7 @@ def sesam_callback(method, callback_config, resource_id, json_data, uri_template
     if method == 'DELETE':
         _id = callback_config['dataset_id'] + ':' + resource_id
         params = {'entity_id' : _id}
-        logger.debug('issuing a call url=%s, params=%s' % (base_url + '/entity', params))
+        logger.debug('issuing a %s call url=%s, params=%s' % (method, base_url + '/entity', params))
         sesam_response = requests.get(url=base_url + '/entity', headers=headers, params=params)
         if sesam_response.status_code != 200:
             logger.warn('cannot fetch \'%s\' from dataset \'%s\' to delete: %s' % (_id, callback_config['dataset_id'], sesam_response.text))
@@ -89,11 +119,12 @@ def sesam_callback(method, callback_config, resource_id, json_data, uri_template
             entity_to_post = sesam_response.json()
             entity_to_post['_deleted'] = True
     else:
-        entity_to_post = to_sesam_entity(json_data, uri_template, callback_config['dataset_id'])
+        entity_to_post = to_sesam_entity(json_data, uri_template, callback_config['dataset_id'], method)
     if entity_to_post:
+        logger.debug('issuing a %s call url=%s, json=%s' % (method, base_url + '/entity', entity_to_post))
         sesam_response = requests.post(url=base_url + '/entities', headers=headers, json=entity_to_post)
         if sesam_response.status_code != 200:
-            logger.warn('cannot post entity \'%s\' to dataset \'%s\' : %s' % (_id, callback_config['dataset_id'], sesam_response.text))
+            logger.warn('cannot post entity \'%s\' to dataset \'%s\' : %s' % (entity_to_post.get('_id'), callback_config['dataset_id'], sesam_response.text))
 
 # Sesam Json Pull Protocol is transformed to Freshdesk API headers
 # Freshdesk rules:
@@ -196,10 +227,10 @@ def fetch_data(path, freshdesk_req_params):
             else:
                 base_url_next_page = None
         if isinstance(data_from_freshdesk, dict):
-            data_to_return = to_sesam_entity(data_from_freshdesk, uri_template, None)
+            data_to_return = to_sesam_entity(data_from_freshdesk, uri_template, None, None)
         elif isinstance(data_from_freshdesk, list):
             for entity in data_from_freshdesk:
-                data_to_return.append(to_sesam_entity(entity, uri_template, None))
+                data_to_return.append(to_sesam_entity(entity, uri_template, None, None))
 
     if uri_template in PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE:
         fields_to_anonymize = PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE[uri_template]
