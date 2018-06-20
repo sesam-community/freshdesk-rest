@@ -1,283 +1,470 @@
-from flask import Flask, request, Response, abort, redirect
+from flask import Flask, request, Response, stream_with_context
 import os
 import requests
 import logging
 import json
 import re
 import sys
+import traceback
+import types
 from time import sleep
 
 app = Flask(__name__)
+
+ENV_DEFAULTS = {
+    'port':
+        5000,
+    'freshdesk_api_path':
+        '/api/v2/',
+    'freshdesk_filter_call_max_page_size':
+        30,
+    'freshdesk_filter_call_max_page_no':
+        10,
+    'sesam_callback_config':
+        '[ \
+        { \
+            "uri_templates" : ["companies/_id_", "companies"], \
+            "config" : \
+                { \
+                    "pipe_id": "freshdesk-company-incremental" \
+                } \
+        } \
+      ]',
+    'generate_sesam_id':
+        'True',
+    'logging_level':
+        'WARNING',
+    'stop_iteration_threshold':
+        500
+}
+# Log to stdout
 format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logger = logging.getLogger('freshdesk-rest-service')
-
-# Log to stdout
 stdout_handler = logging.StreamHandler()
 stdout_handler.setFormatter(logging.Formatter(format_string))
 logger.addHandler(stdout_handler)
-logger.setLevel(os.getenv("logging_level", logging.WARNING))
+logger.setLevel(os.getenv('logging_level', ENV_DEFAULTS.get('logging_level')))
 
-FRESHDESK_DOMAIN = os.getenv("freshdesk_domain")
-FRESHDESK_API_PATH = os.getenv("freshdesk_api_path", "/api/v2/")
+FRESHDESK_DOMAIN = os.getenv('freshdesk_domain')
+FRESHDESK_API_PATH = os.getenv('freshdesk_api_path',
+                               ENV_DEFAULTS.get('freshdesk_api_path'))
 FRESHDESK_FILTER_CALL_MAX_PAGE_SIZE = int(
-    os.getenv("freshdesk_filter_call_max_page_size", 30))
+    os.getenv('freshdesk_filter_call_max_page_size',
+              ENV_DEFAULTS.get('freshdesk_filter_call_max_page_size')))
 FRESHDESK_FILTER_CALL_MAX_PAGE_NO = int(
-    os.getenv("freshdesk_filter_call_max_page_no", 10))
+    os.getenv('freshdesk_filter_call_max_page_no',
+              ENV_DEFAULTS.get('freshdesk_filter_call_max_page_no')))
 FRESHDESK_APIKEY = os.getenv('freshdesk_apikey')
 FRESHDESK_HEADERS = {'Content-Type': 'application/json'}
 FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
-SESAM_URL=os.getenv("sesam_url", None)
-SESAM_JWT=os.getenv("sesam_jwt", None)
 
-PAGE_SIZE = int(os.getenv("page_size", 100))
-DO_GENERATE_SESAM_ID = bool(os.getenv("generate_sesam_id", "True") != "False")
+SESAM_URL = os.getenv('sesam_url', None)
+SESAM_JWT = os.getenv('sesam_jwt', None)
+SESAM_CALLBACK_CONFIG = json.loads(
+    os.getenv('sesam_callback_config',
+              ENV_DEFAULTS.get('sesam_callback_config')))
+DO_GENERATE_SESAM_ID = bool(
+    os.getenv('generate_sesam_id',
+              ENV_DEFAULTS.get('generate_sesam_id')) != 'False')
 
-BLACKLIST_UPDATED_TOKEN_GENERATION = ["surveys"]
-SESAM_CALLBACK_CONFIG = {
-  'companies': {
-    'dataset_id': 'freshdesk-company',
-    'ni_config': {
-      'from_property': 'custom_fields.customer_code',
-      'to_property': 'customer_code-ni',
-      'ni': 'global-customer'
+STOP_ITERATION_THRESHOLD = os.environ.get(
+    'stop_iteration_threshold',
+    ENV_DEFAULTS.get('stop_iteration_threshold'))
+
+required_values = [FRESHDESK_DOMAIN, FRESHDESK_APIKEY]
+for value in required_values:
+    if not value or re.match('^\$\(.*\)$', value):
+        raise SystemExit(
+            'Freshdesk-rest service cannot be started:Not all mandatory variables are initialized'
+        )
+
+BLACKLIST_UPDATED_TOKEN_GENERATION = ['surveys']
+FRESHDESK_HIERARCHY_URI_CONFIG = [
+    {
+        'parent_uri_template': ['solutions/categories'],
+        'children_config': [{
+            'child_uri_template': 'solutions/categories/_id_/folders',
+            'target_property': 'folders'
+        }]
+    },
+    {
+        'parent_uri_template': ['solutions/categories/_id_/folders'],
+        'children_config': [{
+            'child_uri_template': 'solutions/folders/_id_/articles',
+            'target_property': 'articles'
+        }]
+    },
+    {
+        'parent_uri_template': ['tickets',
+                                'tickets/_id_',
+                                'search/tickets'],
+        'children_config': [
+            {
+                'child_uri_template': 'tickets/_id_/time_entries',
+                'target_property': 'time_entries'
+            },
+            {
+                'child_uri_template': 'tickets/_id_/conversations',
+                'target_property': 'conversations'
+            }
+        ]
     }
-  },
-  'companies/_id_': {
-    'dataset_id': 'freshdesk-company',
-    'ni_config': {
-      'from_property': 'custom_fields.customer_code',
-      'to_property': 'customer_code-ni',
-      'ni': 'global-customer'
-    }
-  }
-}
-PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE = json.loads(os.environ.get(
-    'properties_to_anonymize_per_uri_template', "{}").replace("'", "\""))
-ANONYMIZATION_STRING = os.environ.get('anonymization_string', "*")
-VALID_RESPONSE_COMBOS = [("GET", 200), ("POST", 201),
-                         ("PUT", 200), ("DELETE", 204)]
+]
 
-required_vars = [ FRESHDESK_DOMAIN, FRESHDESK_APIKEY]
-for var in required_vars:
-    if var is None or not var:
-        raise SystemExit("Freshdesk-rest service cannot be started:Not all mandatory variables are initialized")
+VALID_RESPONSE_COMBOS = [('GET',
+                          200),
+                         ('POST',
+                          201),
+                         ('PUT',
+                          200),
+                         ('DELETE',
+                          204)]
+
+FRESHDESK_MAX_PAGE_SIZE = 100
+
 
 def get_uri_template(path):
-    return re.sub(r"\d+", r"_id_", path), re.sub(r"[a-zA-Z\/]+", r"", path)
+    return re.sub(r'/$', r'', re.sub(r'\d+', r'_id_', path)), re.sub(
+        r'[a-zA-Z\/]+', r'', path)
 
-def to_sesam_entity(in_dict, path, ni, method):
-    def get_prop_value(key_path, entity):
-        if len(key_path) == 1:
-            val = entity[key_path[-1]]
-            if type(val) in [int, float, bool, str]:
-                return val
-        else:
-            return get_prop_value(key_path[1:], entity[key_path[0]])
 
-    def add_ni(mydict, ni):
-        if not ni:
-            return mydict
-        namespaced_entity = {}
-        for key, value in mydict.items():
-            if '_id' == key:
-                namespaced_entity[key] = ni + ':' + value
-            elif key in ['_updated', '_ts', '_hash','_previous', '_deleted']:
-                namespaced_entity[key] = value
-            else:
-                if type(value) is dict:
-                    namespaced_entity[ni + ':' + key] = add_ni(value, ni)
-                else:
-                    namespaced_entity[ni + ':' + key] = value
-        return namespaced_entity
+def log_exception():
+    exc_type, exc_value, exc_traceback = sys.exc_info()
+    logger.error(
+        traceback.format_exception(exc_type,
+                                   exc_value,
+                                   exc_traceback))
 
+
+def to_sesam_entity(in_dict, uri_template):
     if DO_GENERATE_SESAM_ID:
         in_dict['_id'] = str(in_dict['id'])
-    if path not in BLACKLIST_UPDATED_TOKEN_GENERATION:
+    if uri_template not in BLACKLIST_UPDATED_TOKEN_GENERATION:
         in_dict['_updated'] = str(in_dict['updated_at'])
-    if method in ['PUT', 'POST', 'DELETE'] and re.match(r'^companies', path) and in_dict['custom_fields']['customer_code']:
-        ni_config = SESAM_CALLBACK_CONFIG[path]['ni_config']
-        from_property = ni_config['from_property']
-        val = get_prop_value(from_property.split('.'), in_dict)
-        in_dict[ni_config['to_property']] = '~:' + ni_config['ni'] + ':' + val
+    return in_dict
 
-    return add_ni(in_dict, ni)
 
-def sesam_callback(method, callback_config, resource_id, json_data, uri_template):
+def sesam_callback(method, config, resource_id, json_data, uri_template):
     if not SESAM_URL or not SESAM_JWT:
         return
-    base_url = SESAM_URL + '/api/datasets/'  + callback_config['dataset_id']
-    headers = {'Authorization':'bearer ' + SESAM_JWT, 'Accept': 'application/problem+json', 'content-type' : 'application/json' }
+    callback_url = SESAM_URL + '/api/receivers/' + \
+        config['pipe_id'] + '/entities'
+    headers = {
+        'Authorization': 'bearer ' + SESAM_JWT,
+        'Accept': 'application/problem+json',
+        'content-type': 'application/json'
+    }
     entity_to_post = {}
     if method == 'DELETE':
-        _id = callback_config['dataset_id'] + ':' + resource_id
-        params = {'entity_id' : _id}
-        logger.debug('issuing a %s call url=%s, params=%s' % (method, base_url + '/entity', params))
-        sesam_response = requests.get(url=base_url + '/entity', headers=headers, params=params)
-        if sesam_response.status_code != 200:
-            logger.warn('cannot fetch \'%s\' from dataset \'%s\' to delete: %s' % (_id, callback_config['dataset_id'], sesam_response.text))
-        else:
-            entity_to_post = sesam_response.json()
-            entity_to_post['_deleted'] = True
+        entity_to_post['_id'] = resource_id
+        entity_to_post['_deleted'] = True
     else:
-        entity_to_post = to_sesam_entity(json_data, uri_template, callback_config['dataset_id'], method)
+        entity_to_post = to_sesam_entity(json_data, uri_template)
     if entity_to_post:
-        logger.debug('issuing a %s call url=%s, json=%s' % (method, base_url + '/entity', entity_to_post))
-        sesam_response = requests.post(url=base_url + '/entities', headers=headers, json=entity_to_post)
+        logger.debug(
+            'issuing a %s call url=%s, json=%s' % (method,
+                                                   callback_url + '/entity',
+                                                   entity_to_post))
+        sesam_response = requests.post(
+            url=callback_url,
+            headers=headers,
+            json=entity_to_post)
         if sesam_response.status_code != 200:
-            logger.warn('cannot post entity \'%s\' to dataset \'%s\' : %s' % (entity_to_post.get('_id'), callback_config['dataset_id'], sesam_response.text))
+            logger.warn('cannot post entity \'%s\' to \'%s\' : %s' %
+                        (entity_to_post.get('_id'),
+                         callback_url,
+                         sesam_response.text))
+
 
 # Sesam Json Pull Protocol is transformed to Freshdesk API headers
 # Freshdesk rules:
-#   max page size is 30 for "search" calls, 100 otherwise
-#   "search" calls accepts only following params: query, per_page, page
+#   max page size is 30 for 'search' calls, 100 otherwise
+#   'search' calls accepts only following params: query, per_page, page
 
 
-def get_freshdesk_req_params(path, service_params):
-    freshdesk_req_params = service_params
+def get_freshdesk_req_params(path, params):
     since_support_config = {
-        'tickets': {'param': 'updated_since', 'operator': '='},
-        'contacts': {'param': '_updated_since', 'operator': '='},
-        'surveys/satisfaction_ratings': {'param': 'created_since',
-                'operator': '='},
-        'search/companies': {'param': 'updated_at', 'operator': ':>'},
-        'search/contacts': {'param': 'updated_at', 'operator': ':>'}
+        'tickets': {
+            'fd_param': 'updated_since',
+            'operator': '=',
+            'full_load_since_value': '1970-01-01T00:00:00Z'
+        },
+        'contacts': {
+            'fd_param': '_updated_since',
+            'operator': '=',
+            'full_load_since_value': None
+        },
+        'surveys/satisfaction_ratings': {
+            'fd_param': 'created_since',
+            'operator': '=',
+            'full_load_since_value': '1970-01-01T00:00:00Z'
+        },
+        'search/companies': {
+            'fd_param': 'updated_at',
+            'operator': ':>',
+            'full_load_since_value': '1970-01-01'
+        },
+        'search/contacts': {
+            'fd_param': 'updated_at',
+            'operator': ':>',
+            'full_load_since_value': '1970-01-01'
         }
+    }
 
     uri_template, freshdesk_resource_id = get_uri_template(path)
-    if "search/" not in uri_template:
-        freshdesk_req_params.setdefault(
-            "per_page", service_params.get("limit", PAGE_SIZE))
+    if 'search/' not in uri_template and '_id_' not in uri_template:
+        params.setdefault(
+            'per_page',
+            min(
+                int(params.get('limit',
+                               FRESHDESK_MAX_PAGE_SIZE)),
+                int(params.get('page_size',
+                               FRESHDESK_MAX_PAGE_SIZE))))
 
-    if "limit" in freshdesk_req_params:
-        del freshdesk_req_params["limit"]
-
-    if service_params.get("since") is not None and uri_template in since_support_config:
-        if "search/" in uri_template:
-            since_query_segment = since_support_config[uri_template]["param"] + since_support_config[uri_template]["operator"] + "'" + re.sub(
-                r"T.*", r"", freshdesk_req_params["since"]) + "'"
-            if freshdesk_req_params.get("query", None) is not None:
-                freshdesk_req_params["query"] = "\"(" + service_params.get(
-                    "query").replace("\"", "") + ") AND " + since_query_segment + "\""
+    if uri_template in since_support_config:
+        since_value = params.get(
+            'since',
+            since_support_config[uri_template]['full_load_since_value'])
+        if since_value:
+            if 'search/' in uri_template:
+                since_query_segment = since_support_config[uri_template]['fd_param'] + since_support_config[uri_template]['operator'] + '\'' + re.sub(
+                    r'T.*',
+                    r'',
+                    since_value) + '\''
+                if params.get('query', None) is not None:
+                    params['query'] = '\"(' + params.get('query').replace(
+                        '\"',
+                        '') + ') AND ' + since_query_segment + '\"'
+                else:
+                    params['query'] = '\"' + \
+                        since_query_segment + '\"'
             else:
-                freshdesk_req_params["query"] = "\"" + \
-                    since_query_segment + "\""
-        else:
-            freshdesk_req_params[since_support_config[uri_template]
-                                 ["param"]] = service_params.get("since")
-        del freshdesk_req_params["since"]
+                params[since_support_config[uri_template][
+                    'fd_param']] = since_value
 
-    return freshdesk_req_params
+    # delete params that are specific to SESAM Pull Protocal
+    for param in ['limit', 'page_size', 'since']:
+        if param in params:
+            del params[param]
 
-def call_service(url, params, json):
-    logger.info("Issuing a %s call with url=%s, with param list=%s, headers=%s",
-                request.method, url, params, FRESHDESK_HEADERS)
-    freshdesk_response = requests.request(method=request.method, url=url, headers=FRESHDESK_HEADERS, auth=(
-        FRESHDESK_APIKEY, 'X'), params=params, json=json)
+    return params
+
+
+def call_service(freshdesk_request_session, method, url, params, json_data):
+    logger.debug(
+        'Issuing a %s call with url=%s, with param list=%s, headers=%s',
+        method,
+        url,
+        params,
+        FRESHDESK_HEADERS)
+    freshdesk_response = freshdesk_request_session.request(
+        method=method,
+        url=url,
+        params=params,
+        json=json_data)
     # status code 429 is returned when rate-limit is achived, and returns retry-after value
     if freshdesk_response.status_code in [429]:
         if freshdesk_response.headers.get('Retry-After') is not None:
             retry_after = freshdesk_response.headers.get('Retry-After')
-        logger.error("sleeping for %s seconds", retry_after)
+        logger.error('sleeping for %s seconds', retry_after)
         sleep(float(retry_after))
-    elif (request.method, freshdesk_response.status_code) not in VALID_RESPONSE_COMBOS:
-        logger.error("Unexpected response status code=%d, request-ID=%s, response text=%s" %
-                     (freshdesk_response.status_code, freshdesk_response.headers.get('X-Request-Id'), freshdesk_response.text))
-    elif request.method in ['PUT', 'POST', 'DELETE']:
-        uri_template, freshdesk_resource_id = get_uri_template(url.replace(FRESHDESK_URL_ROOT,  ''))
-        json_data = {}
-        if request.method != 'DELETE':
-            json_data = freshdesk_response.json()
-        if uri_template in SESAM_CALLBACK_CONFIG:
-             sesam_callback(request.method, SESAM_CALLBACK_CONFIG[uri_template], freshdesk_resource_id, json_data, uri_template)
+    elif (method, freshdesk_response.status_code) not in VALID_RESPONSE_COMBOS:
+        logger.error(
+            'Unexpected response status code=%d, request-ID=%s, response text=%s'
+            % (freshdesk_response.status_code,
+               freshdesk_response.headers.get('X-Request-Id'),
+               freshdesk_response.text))
+
+    elif method in ['PUT', 'POST', 'DELETE']:
+        uri_template, freshdesk_resource_id = get_uri_template(
+            url.replace(FRESHDESK_URL_ROOT, ''))
+        json_data_to_sesam = {}
+        if method != 'DELETE':
+            json_data_to_sesam = freshdesk_response.json()
+        for callback_config in SESAM_CALLBACK_CONFIG:
+            if uri_template in callback_config['uri_templates']:
+                sesam_callback(method,
+                               callback_config['config'],
+                               freshdesk_resource_id,
+                               json_data_to_sesam,
+                               uri_template)
     return freshdesk_response
 
 
-# fetches data for any GET request, supports pagination
-def fetch_data(path, freshdesk_req_params):
-    base_url = FRESHDESK_URL_ROOT + path
-    page_counter = 0
+# streams data for any GET request, supports pagination
+def fetch_data(freshdesk_request_session,
+               path,
+               freshdesk_req_params,
+               is_recursed):
+    def check_rate_limit(is_recursed, rate_limit_remaining):
+        if not is_recursed and int(
+                rate_limit_remaining) < STOP_ITERATION_THRESHOLD:
+            logger.warning(
+                'Stoping Iteration due to low rate-limit remaining %s' %
+                freshdesk_response.headers.get('X-Ratelimit-Remaining'))
+            raise StopIteration
 
-    data_to_return = []
+    base_url = FRESHDESK_URL_ROOT + path
     base_url_next_page = base_url
+    page_counter = 0
+    total_enties = 0
     uri_template, freshdesk_resource_id = get_uri_template(path)
-    while base_url_next_page is not None:
-        page_counter += 1
-        freshdesk_response = call_service(
-            base_url_next_page, freshdesk_req_params, None)
-        if freshdesk_response.status_code != 200:
-            return freshdesk_response.text, freshdesk_response.status_code
-        response_json = freshdesk_response.json()
-        # search calls return entites in "results" property
-        if "search/" in uri_template:
-            data_from_freshdesk = response_json.get("results")
-            total_object_count = response_json.get("total")
-            if page_counter == FRESHDESK_FILTER_CALL_MAX_PAGE_NO:
-                logger.error("MAX page number reached before fetching all objects: total_object_count=%s, FRESHDESK_FILTER_CALL_MAX_PAGE_NO=%s, page_counter=%s" % (
-                    total_object_count, FRESHDESK_FILTER_CALL_MAX_PAGE_NO, page_counter))
-                return {"message": "MAX page number reached before fetching all objects"}, 500
-            if total_object_count > page_counter * FRESHDESK_FILTER_CALL_MAX_PAGE_SIZE:
-                freshdesk_req_params["page"] = page_counter + 1
+    try:
+        is_first_yield = True
+        yield '['
+        while base_url_next_page is not None:
+            paged_entities = []
+            page_counter += 1
+            freshdesk_response = call_service(freshdesk_request_session,
+                                              'GET',
+                                              base_url_next_page,
+                                              freshdesk_req_params,
+                                              None)
+            if freshdesk_response.status_code != 200:
+                raise AssertionError(freshdesk_response.text)
+            check_rate_limit(
+                is_recursed,
+                freshdesk_response.headers.get(
+                    'X-Ratelimit-Remaining',
+                    str(STOP_ITERATION_THRESHOLD + 1)))
+            response_json = freshdesk_response.json()
+            # search calls return entites in 'results' property
+            if 'search/' in uri_template:
+                data_from_freshdesk = response_json.get('results')
+                total_object_count = response_json.get('total')
+                if page_counter == FRESHDESK_FILTER_CALL_MAX_PAGE_NO:
+                    logger.error(
+                        'MAX page number reached before fetching all objects: total_object_count=%s, FRESHDESK_FILTER_CALL_MAX_PAGE_NO=%s, page_counter=%s'
+                        % (total_object_count,
+                           FRESHDESK_FILTER_CALL_MAX_PAGE_NO,
+                           page_counter))
+                    raise AssertionError(
+                        'MAX page number reached before fetching all objects')
+                if total_object_count > page_counter * FRESHDESK_FILTER_CALL_MAX_PAGE_SIZE:
+                    freshdesk_req_params['page'] = page_counter + 1
+                else:
+                    base_url_next_page = None
             else:
-                base_url_next_page = None
-        else:
-            data_from_freshdesk = response_json
-            link_text = freshdesk_response.headers.get("Link")
-            if link_text is not None and request.args.get("page") is None:
-                base_url_next_page = link_text[1:link_text.index(">")]
-            else:
-                base_url_next_page = None
-        if isinstance(data_from_freshdesk, dict):
-            data_to_return = to_sesam_entity(data_from_freshdesk, uri_template, None, None)
-        elif isinstance(data_from_freshdesk, list):
-            for entity in data_from_freshdesk:
-                data_to_return.append(to_sesam_entity(entity, uri_template, None, None))
+                data_from_freshdesk = response_json
+                link_text = freshdesk_response.headers.get('Link')
+                if link_text is not None and 'page' not in freshdesk_req_params:
+                    base_url_next_page = link_text[1:link_text.index('>')]
+                else:
+                    base_url_next_page = None
+            if isinstance(data_from_freshdesk, dict):
+                paged_entities.append(
+                    to_sesam_entity(data_from_freshdesk,
+                                    uri_template))
+            elif isinstance(data_from_freshdesk, list):
+                for entity in data_from_freshdesk:
+                    paged_entities.append(
+                        to_sesam_entity(entity,
+                                        uri_template))
 
-    if uri_template in PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE:
-        fields_to_anonymize = PROPERTIES_TO_ANONYMIZE_PER_URI_TEMPLATE[uri_template]
-        for entity in data_from_freshdesk:
-            for prop in fields_to_anonymize:
-                entity[prop] = ANONYMIZATION_STRING
+            # fetch underlying entity types for the resultset
+            for uri_hierarchy in FRESHDESK_HIERARCHY_URI_CONFIG:
+                if uri_template in uri_hierarchy.get('parent_uri_template'):
+                    for child_config in uri_hierarchy.get('children_config'):
+                        for entity in paged_entities:
+                            uri = re.sub(
+                                r'_id_',
+                                str(entity.get('id')),
+                                child_config.get('child_uri_template'))
+                            children_objects = ''
+                            for child in fetch_data(
+                                    freshdesk_request_session,
+                                    uri,
+                                {'per_page': FRESHDESK_MAX_PAGE_SIZE},
+                                    True):
+                                children_objects += child
+                            entity[child_config.get(
+                                'target_property')] = json.loads(
+                                    children_objects)
+            total_enties += len(paged_entities)
+            for data in paged_entities:
+                if not is_first_yield:
+                    yield ','
+                else:
+                    is_first_yield = False
+                yield json.dumps(data)
+            check_rate_limit(
+                is_recursed,
+                freshdesk_response.headers.get('X-Ratelimit-Remaining',
+                                               STOP_ITERATION_THRESHOLD + 1))
 
-    # for sub objects, it is only page size that should be sent
-    freshdesk_req_params = {"per_page": 100}
-    # fetch underlying entity types for the resultset
-    if uri_template == "solutions/categories":
-        for entity in data_to_return:
-            entity["folders"], response_code = fetch_data(
-                uri_template + "/" + str(entity["id"]) + "/folders", freshdesk_req_params)
-    elif uri_template == "solutions/categories/_id_/folders":
-        for entity in data_to_return:
-            entity["articles"], response_code = fetch_data(
-                "solutions/folders/" + str(entity["id"]) + "/articles", freshdesk_req_params)
-    elif uri_template in ["tickets", "search/tickets"]:
-        for entity in data_to_return:
-            entity["conversations"], response_code = fetch_data(
-                "tickets/" + str(entity["id"]) + "/conversations", freshdesk_req_params)
-            entity["time_entries"], response_code = fetch_data(
-                "tickets/" + str(entity["id"]) + "/time_entries", freshdesk_req_params)
-
-    logger.debug("returning %s entities" % len(data_to_return))
-
-    return data_to_return, 200
+    except StopIteration:
+        None
+    except Exception as err:
+        log_exception()
+        yield '500 - encountered error'
+    finally:
+        yield ']'
+    logger.info('returning %s entities' % total_enties)
 
 
-@app.route("/<path:path>", methods=["GET"])
+def get_freshdesk_session():
+    session = requests.Session()
+    session.auth = (FRESHDESK_APIKEY, 'X')
+    session.headers = FRESHDESK_HEADERS
+    return session
+
+
+@app.route('/<path:path>', methods=['GET'])
 def get(path):
-    freshdesk_req_params = get_freshdesk_req_params(
-        path, request.args.to_dict(True))
-    data_to_return, status_code = fetch_data(path, freshdesk_req_params)
-    return Response(response=json.dumps(data_to_return), status=status_code, mimetype='application/json', content_type='application/json; charset=utf-8')
+    try:
+        freshdesk_req_params = get_freshdesk_req_params(
+            path,
+            request.args.to_dict(True))
+        with get_freshdesk_session() as freshdesk_request_session:
+            return Response(
+                response=fetch_data(freshdesk_request_session,
+                                    path,
+                                    freshdesk_req_params,
+                                    False),
+                content_type='application/json; charset=utf-8')
+    except Exception as err:
+        log_exception()
+        return Response(
+            response=json.dumps({
+                'message': str(err)
+            }),
+            status=500,
+            mimetype='application/json',
+            content_type='application/json; charset=utf-8')
 
 
-@app.route("/<path:path>", methods=["POST", "PUT", "DELETE"])
+@app.route('/<path:path>', methods=['POST', 'PUT', 'DELETE'])
 def push(path):
-    base_url = FRESHDESK_URL_ROOT + path
-    freshdesk_req_params = get_freshdesk_req_params(
-        base_url, request.args.to_dict(True))
-    freshdesk_response = call_service(
-        base_url, freshdesk_req_params, request.get_json())
-    return Response(response=freshdesk_response, status=freshdesk_response.status_code, mimetype='application/json', content_type='application/json; charset=utf-8')
+    try:
+        base_url = FRESHDESK_URL_ROOT + path
+        freshdesk_req_params = get_freshdesk_req_params(
+            base_url,
+            request.args.to_dict(True))
+        with get_freshdesk_session() as freshdesk_request_session:
+            freshdesk_response = call_service(freshdesk_request_session,
+                                              request.method,
+                                              base_url,
+                                              freshdesk_req_params,
+                                              request.get_json())
+        return Response(
+            response=freshdesk_response,
+            status=freshdesk_response.status_code,
+            mimetype='application/json',
+            content_type='application/json; charset=utf-8')
+    except Exception as err:
+        log_exception()
+        return Response(
+            response=json.dumps({
+                'message': str(err)
+            }),
+            status=500,
+            mimetype='application/json',
+            content_type='application/json; charset=utf-8')
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=os.getenv('port', 5000))
+    app.run(
+        debug=True,
+        host='0.0.0.0',
+        port=os.getenv('port',
+                       ENV_DEFAULTS.get('port')))

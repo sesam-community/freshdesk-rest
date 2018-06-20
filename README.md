@@ -5,12 +5,12 @@
 This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and [Freshdesk](https://developers.freshdesk.com/api/) integration as source or receiver system.
 
 ### Implemented Features:
+* streaming of response content
 * pagination
 * continuation support (i.e. [Sesam's JSON Pull Protocol](https://docs.sesam.io/json-pull.html)  )
 * rate-limit handling
 * GET, PUT, POST, DELETE requests
-* anonymization of fields
-* _id property generation in GET requests
+* _id and _updated property generation in GET requests
 * optional sesam callback feature for PUT/POST/DELETE requests. requires both _sesam_url_ and _sesam_node_ to be set
 
 
@@ -85,23 +85,26 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
 
 
 ##### configuration items:
+
+Configuration Items are either of a number or string. Thus, '"' char must be escaped in strings.
+
 | CONFIG_NAME        | DESCRIPTION           | IS_REQUIRED  |DEFAULT_VALUE|
 | -------------------|:---------------------:|:------------:|:-----------:|
+| port | port number for the service  | no | 5000 |
 | freshdesk_domain | Freshdesk domain  | yes | n/a |
-| freshdesk_api_path | path for API | no | /api/v2/ |
+| freshdesk_api_path | path for API | no | "/api/v2/" |
 | freshdesk_filter_call_max_page_size | Maximum allowed number of entities in a filter call | no | 30 |
 | freshdesk_filter_call_max_page_no | Maximum allowed number of pages in a filter call | no | 10 |
 | freshdesk_apikey | Freshdesk apikey | yes | n/a |
-| logging_level | Level value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | WARNING |
-| properties_to_anonymize_per_uri_template | Dictionary where key are API calls URI template and values are list of object properties to be anonymized | no | {} |
-| anonymization_string | the string value used for anonymization of values | no | * |
-|generate_sesam_id | Flag to control the generation of _id property. Set "False" to get entities without _id field populated, any other value otherwise | no | True |
+| logging_level | Level value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | "WARNING" |
+| stop_iteration_threshold | numeric threshold to stop GET requests to Freshdesk. Checked once per page.  | no | 500 |
 | sesam_url | sesam url e.g. _https://datahub-1426e5f8.sesam.cloud_  | no | n/a |
 | sesam_jwt | sesam_jwt for the sesam node | no | n/a |
 
 
 ##### example configuration in SESAM:
 
+minimal:
 ```
 {
   "_id": "freshdesk-rest-proxy",
@@ -110,7 +113,31 @@ curl -X DELETE  http://localhost:5000/conversations/[company_id]
     "environment": {
       "freshdesk_apikey": "$SECRET(freshdesk-apikey)",
       "freshdesk_domain": "$ENV(freshdesk-domain)"
-      "logging_level": "INFO"
+    },
+    "image": "sesamcommunity/freshdesk-rest:latest",
+    "port": 5000
+  }
+}
+
+```
+maximal:
+
+```
+{
+  "_id": "freshdesk-rest-proxy",
+  "type": "system:microservice",
+  "docker": {
+    "environment": {
+      "port": 5000,
+      "freshdesk_apikey": "$SECRET(freshdesk-apikey)",
+      "freshdesk_domain": "$ENV(freshdesk-domain)"
+      "freshdesk_api_path": "/api/v2/",
+      "freshdesk_filter_call_max_page_size": 30,
+      "freshdesk_filter_call_max_page_no": 10,
+      "logging_level": "DEBUG",
+      "stop_iteration_threshold": 1000,
+      "sesam_url": "https://my-sesam-subscription.sesam.cloud",
+      "sesam_jwt": "mysesamjwt"
     },
     "image": "sesamcommunity/freshdesk-rest:latest",
     "port": 5000
