@@ -26,7 +26,7 @@ ENV_DEFAULTS = {
             "uri_templates" : ["companies/_id_", "companies"], \
             "config" : \
                 { \
-                    "pipe_id": "freshdesk-company-incremental" \
+                    "pipe_id": "freshdesk-company-receiver" \
                 } \
         } \
       ]',
