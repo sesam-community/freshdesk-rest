@@ -36,6 +36,15 @@ Limitations
 ```
 
 The service listens on port 5000 on localhost.
+
+### Running the docker image
+```
+  docker pull DOCKER_USER/freshdesk-rest:IMAGE_TAG
+  docker run -p 5000:5000 --env-file [envlist_file] DOCKER_USER/freshdesk-rest:IMAGE_TAG
+```
+
+The service listens on port 5000 on localhost.
+
 ### Example calls
 
 ##### GET
@@ -96,9 +105,9 @@ Configuration Items are either of a number or string. Thus, '"' char must be esc
 | freshdesk_filter_call_max_page_no | Maximum allowed number of pages in a filter call | no | 10 |
 | freshdesk_apikey | Freshdesk apikey | yes | n/a |
 | logging_level | Level value of the logging level for the service (see https://docs.python.org/2/library/logging.html#logging-levels) | no | "WARNING" |
-| retard_iteration_threshold | numeric threshold for rate-limit. Once passed streams content will be retarded by retard_by_seconds secs. Checked once per page.  | no | 1500 |
-| stop_iteration_threshold | numeric threshold for rate-limit. Once passed 3 things might happen: 1-new requests will be either rejected 2-ongoing streams will be stopped if it is an incremental fetch 3-Response will be disrupted it it is a full scan fetch. Checked once per page.  | no | 500 |
-| retard_by_seconds | duration of delay in seconds when retard_iteration_threshold reached | no | 60 |
+| threshold_delayed_response | numeric threshold for rate-limit. Once passed streams content will be retarded by retard_by_seconds secs. Checked once per page.  | no | 1500 |
+| threshold_reject_requests | numeric threshold for rate-limit. Once passed 3 things might happen: 1-new requests will be either rejected 2-ongoing streams will be stopped if it is an incremental fetch 3-Response will be disrupted it it is a full scan fetch. Checked once per page.  | no | 500 |
+| delay_responses_by_seconds | duration of delay in seconds when threshold_delayed_response reached | no | 60 |
 | sesam_url | sesam url e.g. _https://datahub-1426e5f8.sesam.cloud_  | no | n/a |
 | sesam_jwt | sesam_jwt for the sesam node | no | n/a |
 
@@ -136,7 +145,9 @@ maximal:
       "freshdesk_filter_call_max_page_size": 30,
       "freshdesk_filter_call_max_page_no": 10,
       "logging_level": "DEBUG",
-      "stop_iteration_threshold": 1000,
+      "threshold_delayed_response": 2000
+      "threshold_reject_requests": 1000,
+      "delay_responses_by_seconds": 30
       "sesam_url": "https://my-sesam-subscription.sesam.cloud",
       "sesam_jwt": "mysesamjwt"
     },

@@ -34,11 +34,11 @@ ENV_DEFAULTS = {
         'True',
     'logging_level':
         'WARNING',
-    'retard_iteration_threshold':
+    'threshold_delayed_response':
         1500,
-    'stop_iteration_threshold':
-        500
-    'retard_by_seconds':
+    'threshold_reject_requests':
+        500,
+    'delay_responses_by_seconds':
         60
 }
 # Log to stdout
@@ -71,16 +71,20 @@ DO_GENERATE_SESAM_ID = bool(
     os.getenv('generate_sesam_id',
               ENV_DEFAULTS.get('generate_sesam_id')) != 'False')
 
-ITERATION_THRESHOLDS = {'RETARD': int(os.environ.get(
-        'retard_iteration_threshold',
-        ENV_DEFAULTS.get('retard_iteration_threshold'))),
-    'STOP': int(os.environ.get(
-            'stop_iteration_threshold',
-            ENV_DEFAULTS.get('stop_iteration_threshold')))}
+RATE_LIMIT_HANDLING_THRESHOLDS = {
+    'DELAYED_RESPONSE':
+        int(
+            os.environ.get('threshold_delayed_response',
+                           ENV_DEFAULTS.get('threshold_delayed_response'))),
+    'REJECT_REQUESTS':
+        int(
+            os.environ.get('threshold_reject_requests',
+                           ENV_DEFAULTS.get('threshold_reject_requests')))
+}
 
-RETARD_BY_SECONDS = int(os.environ.get(
-        'retard_by_seconds',
-        ENV_DEFAULTS.get('retard_by_seconds')))
+DELAY_RESPONSES_BY_SECONDS = int(
+    os.environ.get('delay_responses_by_seconds',
+                   ENV_DEFAULTS.get('delay_responses_by_seconds')))
 
 required_values = [FRESHDESK_DOMAIN, FRESHDESK_APIKEY]
 for value in required_values:
@@ -240,7 +244,8 @@ def get_freshdesk_req_params(path, params):
         if since_value:
             is_full_scan = False
         else:
-            since_value = SINCE_SUPPORT_CONFIG[uri_template]['full_load_since_value']
+            since_value = SINCE_SUPPORT_CONFIG[uri_template][
+                'full_load_since_value']
         if since_value:
             if 'search/' in uri_template:
                 since_query_segment = SINCE_SUPPORT_CONFIG[uri_template]['fd_param'] + SINCE_SUPPORT_CONFIG[uri_template]['operator'] + '\'' + re.sub(
@@ -313,25 +318,36 @@ def fetch_data(freshdesk_request_session,
                is_recursed,
                is_full_scan):
     active_rate_limit_handling_policy = None
-    def check_rate_limit(is_recursed, rate_limit_remaining, active_rate_limit_handling_policy, is_full_scan):
+
+    def check_rate_limit(is_recursed,
+                         rate_limit_remaining,
+                         active_rate_limit_handling_policy,
+                         is_full_scan):
         policy = 'DEFAULT'
         if not is_recursed and rate_limit_remaining:
-            if int(rate_limit_remaining) < ITERATION_THRESHOLDS['STOP']:
-                policy = 'STOP'
-            elif int(rate_limit_remaining) < ITERATION_THRESHOLDS['RETARD']:
-                policy = 'RETARD'
-        if active_rate_limit_handling_policy != policy:
+            if int(rate_limit_remaining
+                   ) < RATE_LIMIT_HANDLING_THRESHOLDS['REJECT_REQUESTS']:
+                policy = 'REJECT_REQUESTS'
+            elif int(rate_limit_remaining
+                     ) < RATE_LIMIT_HANDLING_THRESHOLDS['DELAYED_RESPONSE']:
+                policy = 'DELAYED_RESPONSE'
+            if active_rate_limit_handling_policy != policy and not (
+                    policy == 'DEFAULT' and not active_rate_limit_handling_policy):
                 logger.warning(
-                    'Applying %s policy after rate-limit vs %s_ITERATION_THRESHOLD check (%s vs %s)' %
-                    (policy, policy, rate_limit_remaining, ITERATION_THRESHOLDS.get(policy)))
+                    'Applying %s policy after checking remaining rate-limit against the threshold value (%s vs %s)'
+                    % (policy,
+                       rate_limit_remaining,
+                       RATE_LIMIT_HANDLING_THRESHOLDS.get(policy)))
                 active_rate_limit_handling_policy = policy
-        if policy == 'RETARD':
-            sleep(RETARD_BY_SECONDS)
-        elif policy == 'STOP':
-            if path in SINCE_SUPPORT_CONFIG and not is_full_scan:
-                raise StopIteration
-            else:
-                raise RuntimeError('Request rejected. Rate-limit reamining is less then the STOP_ITERATION_THRESHOLD')
+            if policy == 'DELAYED_RESPONSE':
+                sleep(DELAY_RESPONSES_BY_SECONDS)
+            elif policy == 'REJECT_REQUESTS':
+                if path in SINCE_SUPPORT_CONFIG and not is_full_scan:
+                    raise StopIteration
+                else:
+                    raise RuntimeError(
+                        'Request rejected. Rate-limit reamining is less then the THRESHOLD_REJECT_REQUESTS'
+                    )
         return policy
 
     base_url = FRESHDESK_URL_ROOT + path
@@ -405,7 +421,8 @@ def fetch_data(freshdesk_request_session,
                                     freshdesk_request_session,
                                     uri,
                                 {'per_page': FRESHDESK_MAX_PAGE_SIZE},
-                                    True):
+                                    True,
+                                    is_full_scan):
                                 children_objects += child
                             entity[child_config.get(
                                 'target_property')] = json.loads(
