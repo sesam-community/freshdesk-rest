@@ -34,8 +34,12 @@ ENV_DEFAULTS = {
         'True',
     'logging_level':
         'WARNING',
-    'stop_iteration_threshold':
-        500
+    'threshold_delayed_response':
+        1500,
+    'threshold_reject_requests':
+        500,
+    'delay_responses_by_seconds':
+        60
 }
 # Log to stdout
 format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -67,9 +71,20 @@ DO_GENERATE_SESAM_ID = bool(
     os.getenv('generate_sesam_id',
               ENV_DEFAULTS.get('generate_sesam_id')) != 'False')
 
-STOP_ITERATION_THRESHOLD = os.environ.get(
-    'stop_iteration_threshold',
-    ENV_DEFAULTS.get('stop_iteration_threshold'))
+RATE_LIMIT_HANDLING_THRESHOLDS = {
+    'DELAYED_RESPONSE':
+        int(
+            os.environ.get('threshold_delayed_response',
+                           ENV_DEFAULTS.get('threshold_delayed_response'))),
+    'REJECT_REQUESTS':
+        int(
+            os.environ.get('threshold_reject_requests',
+                           ENV_DEFAULTS.get('threshold_reject_requests')))
+}
+
+DELAY_RESPONSES_BY_SECONDS = int(
+    os.environ.get('delay_responses_by_seconds',
+                   ENV_DEFAULTS.get('delay_responses_by_seconds')))
 
 required_values = [FRESHDESK_DOMAIN, FRESHDESK_APIKEY]
 for value in required_values:
@@ -110,6 +125,36 @@ FRESHDESK_HIERARCHY_URI_CONFIG = [
         ]
     }
 ]
+
+# fd_param, operator, full_load_since_value fields are defined either to overcome
+# or to make full runs for search/XXX path valid
+SINCE_SUPPORT_CONFIG = {
+    'tickets': {
+        'fd_param': 'updated_since',
+        'operator': '=',
+        'full_load_since_value': '1970-01-01T00:00:00Z'
+    },
+    'contacts': {
+        'fd_param': '_updated_since',
+        'operator': '=',
+        'full_load_since_value': None
+    },
+    'surveys/satisfaction_ratings': {
+        'fd_param': 'created_since',
+        'operator': '=',
+        'full_load_since_value': '1970-01-01T00:00:00Z'
+    },
+    'search/companies': {
+        'fd_param': 'updated_at',
+        'operator': ':>',
+        'full_load_since_value': '1970-01-01'
+    },
+    'search/contacts': {
+        'fd_param': 'updated_at',
+        'operator': ':>',
+        'full_load_since_value': '1970-01-01'
+    }
+}
 
 VALID_RESPONSE_COMBOS = [('GET',
                           200),
@@ -183,34 +228,6 @@ def sesam_callback(method, config, resource_id, json_data, uri_template):
 
 
 def get_freshdesk_req_params(path, params):
-    since_support_config = {
-        'tickets': {
-            'fd_param': 'updated_since',
-            'operator': '=',
-            'full_load_since_value': '1970-01-01T00:00:00Z'
-        },
-        'contacts': {
-            'fd_param': '_updated_since',
-            'operator': '=',
-            'full_load_since_value': None
-        },
-        'surveys/satisfaction_ratings': {
-            'fd_param': 'created_since',
-            'operator': '=',
-            'full_load_since_value': '1970-01-01T00:00:00Z'
-        },
-        'search/companies': {
-            'fd_param': 'updated_at',
-            'operator': ':>',
-            'full_load_since_value': '1970-01-01'
-        },
-        'search/contacts': {
-            'fd_param': 'updated_at',
-            'operator': ':>',
-            'full_load_since_value': '1970-01-01'
-        }
-    }
-
     uri_template, freshdesk_resource_id = get_uri_template(path)
     if 'search/' not in uri_template and '_id_' not in uri_template:
         params.setdefault(
@@ -221,13 +238,17 @@ def get_freshdesk_req_params(path, params):
                 int(params.get('page_size',
                                FRESHDESK_MAX_PAGE_SIZE))))
 
-    if uri_template in since_support_config:
-        since_value = params.get(
-            'since',
-            since_support_config[uri_template]['full_load_since_value'])
+    is_full_scan = True
+    if uri_template in SINCE_SUPPORT_CONFIG:
+        since_value = params.get('since')
+        if since_value:
+            is_full_scan = False
+        else:
+            since_value = SINCE_SUPPORT_CONFIG[uri_template][
+                'full_load_since_value']
         if since_value:
             if 'search/' in uri_template:
-                since_query_segment = since_support_config[uri_template]['fd_param'] + since_support_config[uri_template]['operator'] + '\'' + re.sub(
+                since_query_segment = SINCE_SUPPORT_CONFIG[uri_template]['fd_param'] + SINCE_SUPPORT_CONFIG[uri_template]['operator'] + '\'' + re.sub(
                     r'T.*',
                     r'',
                     since_value) + '\''
@@ -239,15 +260,14 @@ def get_freshdesk_req_params(path, params):
                     params['query'] = '\"' + \
                         since_query_segment + '\"'
             else:
-                params[since_support_config[uri_template][
+                params[SINCE_SUPPORT_CONFIG[uri_template][
                     'fd_param']] = since_value
 
     # delete params that are specific to SESAM Pull Protocal
     for param in ['limit', 'page_size', 'since']:
         if param in params:
             del params[param]
-
-    return params
+    return params, is_full_scan
 
 
 def call_service(freshdesk_request_session, method, url, params, json_data):
@@ -295,14 +315,40 @@ def call_service(freshdesk_request_session, method, url, params, json_data):
 def fetch_data(freshdesk_request_session,
                path,
                freshdesk_req_params,
-               is_recursed):
-    def check_rate_limit(is_recursed, rate_limit_remaining):
-        if not is_recursed and int(
-                rate_limit_remaining) < STOP_ITERATION_THRESHOLD:
-            logger.warning(
-                'Stoping Iteration due to low rate-limit remaining %s' %
-                freshdesk_response.headers.get('X-Ratelimit-Remaining'))
-            raise StopIteration
+               is_recursed,
+               is_full_scan):
+    active_rate_limit_handling_policy = None
+
+    def check_rate_limit(is_recursed,
+                         rate_limit_remaining,
+                         active_rate_limit_handling_policy,
+                         is_full_scan):
+        policy = 'DEFAULT'
+        if not is_recursed and rate_limit_remaining:
+            if int(rate_limit_remaining
+                   ) < RATE_LIMIT_HANDLING_THRESHOLDS['REJECT_REQUESTS']:
+                policy = 'REJECT_REQUESTS'
+            elif int(rate_limit_remaining
+                     ) < RATE_LIMIT_HANDLING_THRESHOLDS['DELAYED_RESPONSE']:
+                policy = 'DELAYED_RESPONSE'
+            if active_rate_limit_handling_policy != policy and not (
+                    policy == 'DEFAULT' and not active_rate_limit_handling_policy):
+                logger.warning(
+                    'Applying %s policy after checking remaining rate-limit against the threshold value (%s vs %s)'
+                    % (policy,
+                       rate_limit_remaining,
+                       RATE_LIMIT_HANDLING_THRESHOLDS.get(policy)))
+                active_rate_limit_handling_policy = policy
+            if policy == 'DELAYED_RESPONSE':
+                sleep(DELAY_RESPONSES_BY_SECONDS)
+            elif policy == 'REJECT_REQUESTS':
+                if path in SINCE_SUPPORT_CONFIG and not is_full_scan:
+                    raise StopIteration
+                else:
+                    raise RuntimeError(
+                        'Request rejected. Rate-limit reamining is less then the THRESHOLD_REJECT_REQUESTS'
+                    )
+        return policy
 
     base_url = FRESHDESK_URL_ROOT + path
     base_url_next_page = base_url
@@ -322,11 +368,11 @@ def fetch_data(freshdesk_request_session,
                                               None)
             if freshdesk_response.status_code != 200:
                 raise AssertionError(freshdesk_response.text)
-            check_rate_limit(
+            active_rate_limit_handling_policy = check_rate_limit(
                 is_recursed,
-                freshdesk_response.headers.get(
-                    'X-Ratelimit-Remaining',
-                    str(STOP_ITERATION_THRESHOLD + 1)))
+                freshdesk_response.headers.get('X-Ratelimit-Remaining'),
+                active_rate_limit_handling_policy,
+                is_full_scan)
             response_json = freshdesk_response.json()
             # search calls return entites in 'results' property
             if 'search/' in uri_template:
@@ -375,7 +421,8 @@ def fetch_data(freshdesk_request_session,
                                     freshdesk_request_session,
                                     uri,
                                 {'per_page': FRESHDESK_MAX_PAGE_SIZE},
-                                    True):
+                                    True,
+                                    is_full_scan):
                                 children_objects += child
                             entity[child_config.get(
                                 'target_property')] = json.loads(
@@ -387,10 +434,11 @@ def fetch_data(freshdesk_request_session,
                 else:
                     is_first_yield = False
                 yield json.dumps(data)
-            check_rate_limit(
+            active_rate_limit_handling_policy = check_rate_limit(
                 is_recursed,
-                freshdesk_response.headers.get('X-Ratelimit-Remaining',
-                                               STOP_ITERATION_THRESHOLD + 1))
+                freshdesk_response.headers.get('X-Ratelimit-Remaining'),
+                active_rate_limit_handling_policy,
+                is_full_scan)
 
     except StopIteration:
         None
@@ -412,7 +460,7 @@ def get_freshdesk_session():
 @app.route('/<path:path>', methods=['GET'])
 def get(path):
     try:
-        freshdesk_req_params = get_freshdesk_req_params(
+        freshdesk_req_params, is_full_scan = get_freshdesk_req_params(
             path,
             request.args.to_dict(True))
         with get_freshdesk_session() as freshdesk_request_session:
@@ -420,7 +468,8 @@ def get(path):
                 response=fetch_data(freshdesk_request_session,
                                     path,
                                     freshdesk_req_params,
-                                    False),
+                                    False,
+                                    is_full_scan),
                 content_type='application/json; charset=utf-8')
     except Exception as err:
         log_exception()
@@ -437,7 +486,7 @@ def get(path):
 def push(path):
     try:
         base_url = FRESHDESK_URL_ROOT + path
-        freshdesk_req_params = get_freshdesk_req_params(
+        freshdesk_req_params, is_full_scan = get_freshdesk_req_params(
             base_url,
             request.args.to_dict(True))
         with get_freshdesk_session() as freshdesk_request_session:
