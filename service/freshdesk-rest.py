@@ -35,9 +35,9 @@ ENV_DEFAULTS = {
     'logging_level':
         'WARNING',
     'threshold_delayed_response':
-        1500,
+        '0.3',
     'threshold_reject_requests':
-        500,
+        '0.1',
     'delay_responses_by_seconds':
         60
 }
@@ -71,16 +71,16 @@ DO_GENERATE_SESAM_ID = bool(
     os.getenv('generate_sesam_id',
               ENV_DEFAULTS.get('generate_sesam_id')) != 'False')
 
-RATE_LIMIT_HANDLING_THRESHOLDS = {
-    'DELAYED_RESPONSE':
-        int(
-            os.environ.get('threshold_delayed_response',
-                           ENV_DEFAULTS.get('threshold_delayed_response'))),
-    'REJECT_REQUESTS':
-        int(
-            os.environ.get('threshold_reject_requests',
-                           ENV_DEFAULTS.get('threshold_reject_requests')))
-}
+RATE_LIMIT_HANDLING_THRESHOLDS = [
+    ('REJECT_REQUESTS',
+     float(
+         os.environ.get('threshold_reject_requests',
+                        ENV_DEFAULTS.get('threshold_reject_requests')))),
+    ('DELAYED_RESPONSE',
+     float(
+         os.environ.get('threshold_delayed_response',
+                        ENV_DEFAULTS.get('threshold_delayed_response'))))
+]
 
 DELAY_RESPONSES_BY_SECONDS = int(
     os.environ.get('delay_responses_by_seconds',
@@ -321,23 +321,32 @@ def fetch_data(freshdesk_request_session,
 
     def check_rate_limit(is_recursed,
                          rate_limit_remaining,
+                         rate_limit_total,
                          active_rate_limit_handling_policy,
                          is_full_scan):
         policy = 'DEFAULT'
+        policy_threshold = None
         if not is_recursed and rate_limit_remaining:
-            if int(rate_limit_remaining
-                   ) < RATE_LIMIT_HANDLING_THRESHOLDS['REJECT_REQUESTS']:
-                policy = 'REJECT_REQUESTS'
-            elif int(rate_limit_remaining
-                     ) < RATE_LIMIT_HANDLING_THRESHOLDS['DELAYED_RESPONSE']:
-                policy = 'DELAYED_RESPONSE'
+            current_ratio = int(rate_limit_remaining) / float(rate_limit_total)
+            for tmp_policy, tmp_threshold in RATE_LIMIT_HANDLING_THRESHOLDS:
+                if (tmp_threshold < 1
+                        and current_ratio <
+                        tmp_threshold) or (
+                            tmp_threshold > 1
+                            and int(rate_limit_remaining) < tmp_threshold):
+                    policy = tmp_policy
+                    policy_threshold = tmp_threshold
+                    break
             if active_rate_limit_handling_policy != policy and not (
-                    policy == 'DEFAULT' and not active_rate_limit_handling_policy):
+                    policy == 'DEFAULT'
+                    and not active_rate_limit_handling_policy):
                 logger.warning(
-                    'Applying %s policy after checking remaining rate-limit against the threshold value (%s vs %s)'
+                    'Applying %s policy after checking remaining rate-limit against the threshold value (%s/%s=%s vs %s)'
                     % (policy,
                        rate_limit_remaining,
-                       RATE_LIMIT_HANDLING_THRESHOLDS.get(policy)))
+                       rate_limit_total,
+                           int(rate_limit_remaining) / int(rate_limit_total),
+                       policy_threshold))
                 active_rate_limit_handling_policy = policy
             if policy == 'DELAYED_RESPONSE':
                 sleep(DELAY_RESPONSES_BY_SECONDS)
@@ -371,6 +380,7 @@ def fetch_data(freshdesk_request_session,
             active_rate_limit_handling_policy = check_rate_limit(
                 is_recursed,
                 freshdesk_response.headers.get('X-Ratelimit-Remaining'),
+                freshdesk_response.headers.get('X-Ratelimit-Total'),
                 active_rate_limit_handling_policy,
                 is_full_scan)
             response_json = freshdesk_response.json()
@@ -437,6 +447,7 @@ def fetch_data(freshdesk_request_session,
             active_rate_limit_handling_policy = check_rate_limit(
                 is_recursed,
                 freshdesk_response.headers.get('X-Ratelimit-Remaining'),
+                freshdesk_response.headers.get('X-Ratelimit-Total'),
                 active_rate_limit_handling_policy,
                 is_full_scan)
 
