@@ -145,8 +145,8 @@ maximal:
       "freshdesk_filter_call_max_page_size": 30,
       "freshdesk_filter_call_max_page_no": 10,
       "logging_level": "DEBUG",
-      "threshold_delayed_response": 2000
-      "threshold_reject_requests": 1000,
+      "threshold_delayed_response": 0.3
+      "threshold_reject_requests": 0.1,
       "delay_responses_by_seconds": 30
       "sesam_url": "https://my-sesam-subscription.sesam.cloud",
       "sesam_jwt": "mysesamjwt"
