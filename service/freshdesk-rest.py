@@ -35,9 +35,9 @@ ENV_DEFAULTS = {
     'logging_level':
         'WARNING',
     'threshold_delayed_response':
-        1500,
+        '0.3',
     'threshold_reject_requests':
-        500,
+        '0.1',
     'delay_responses_by_seconds':
         60
 }
@@ -71,16 +71,16 @@ DO_GENERATE_SESAM_ID = bool(
     os.getenv('generate_sesam_id',
               ENV_DEFAULTS.get('generate_sesam_id')) != 'False')
 
-RATE_LIMIT_HANDLING_THRESHOLDS = {
-    'DELAYED_RESPONSE':
-        int(
-            os.environ.get('threshold_delayed_response',
-                           ENV_DEFAULTS.get('threshold_delayed_response'))),
-    'REJECT_REQUESTS':
-        int(
-            os.environ.get('threshold_reject_requests',
-                           ENV_DEFAULTS.get('threshold_reject_requests')))
-}
+RATE_LIMIT_HANDLING_THRESHOLDS = [
+    ('REJECT_REQUESTS',
+     float(
+         os.environ.get('threshold_reject_requests',
+                        ENV_DEFAULTS.get('threshold_reject_requests')))),
+    ('DELAYED_RESPONSE',
+     float(
+         os.environ.get('threshold_delayed_response',
+                        ENV_DEFAULTS.get('threshold_delayed_response'))))
+]
 
 DELAY_RESPONSES_BY_SECONDS = int(
     os.environ.get('delay_responses_by_seconds',
@@ -125,6 +125,13 @@ FRESHDESK_HIERARCHY_URI_CONFIG = [
         ]
     }
 ]
+
+# extension mechanism extends result set so that objects that are not returned when asked for "All" are also included
+# At the moment extension works on a single parameter per path
+FRESHDESK_REQUEST_EXTENSION_CONFIG = {
+    'tickets': [{'param_name':'filter', 'param_value':'spam'}, { 'param_name':'filter', 'param_value': 'deleted'}],
+    'contacts': [{'param_name':'state', 'param_value':'deleted'}, {'param_name':'state', 'param_value': 'blocked'}]
+}
 
 # fd_param, operator, full_load_since_value fields are defined either to overcome
 # or to make full runs for search/XXX path valid
@@ -227,7 +234,8 @@ def sesam_callback(method, config, resource_id, json_data, uri_template):
 #   'search' calls accepts only following params: query, per_page, page
 
 
-def get_freshdesk_req_params(path, params):
+def get_params(path, params):
+    execution_params = {'is_full_scan' : True, 'is_recursed': False, 'active_rate_limit_handling_policy' : None}
     uri_template, freshdesk_resource_id = get_uri_template(path)
     if 'search/' not in uri_template and '_id_' not in uri_template:
         params.setdefault(
@@ -238,11 +246,10 @@ def get_freshdesk_req_params(path, params):
                 int(params.get('page_size',
                                FRESHDESK_MAX_PAGE_SIZE))))
 
-    is_full_scan = True
     if uri_template in SINCE_SUPPORT_CONFIG:
         since_value = params.get('since')
         if since_value:
-            is_full_scan = False
+            execution_params['is_full_scan'] = False
         else:
             since_value = SINCE_SUPPORT_CONFIG[uri_template][
                 'full_load_since_value']
@@ -267,7 +274,7 @@ def get_freshdesk_req_params(path, params):
     for param in ['limit', 'page_size', 'since']:
         if param in params:
             del params[param]
-    return params, is_full_scan
+    return params, execution_params
 
 
 def call_service(freshdesk_request_session, method, url, params, json_data):
@@ -315,30 +322,46 @@ def call_service(freshdesk_request_session, method, url, params, json_data):
 def fetch_data(freshdesk_request_session,
                path,
                freshdesk_req_params,
-               is_recursed,
-               is_full_scan):
-    active_rate_limit_handling_policy = None
+                execution_params):
 
-    def check_rate_limit(is_recursed,
-                         rate_limit_remaining,
-                         active_rate_limit_handling_policy,
-                         is_full_scan):
+
+    def update_execution_params(path, freshdesk_req_params, execution_params):
+        execution_params['extension_index'] = 0
+        for extension in FRESHDESK_REQUEST_EXTENSION_CONFIG.get(path, []):
+            if freshdesk_req_params.get(extension['param_name']) == extension['param_value']:
+                execution_params['is_extension_on'] = False
+                execution_params['is_hierarchy_on'] = extension.get('is_hierarchy_on', False)
+                return
+        execution_params['is_extension_on'] = True
+        execution_params['is_hierarchy_on'] = True
+
+    def check_rate_limit(rate_limit_remaining,
+                         rate_limit_total,
+                         execution_params):
         policy = 'DEFAULT'
-        if not is_recursed and rate_limit_remaining:
-            if int(rate_limit_remaining
-                   ) < RATE_LIMIT_HANDLING_THRESHOLDS['REJECT_REQUESTS']:
-                policy = 'REJECT_REQUESTS'
-            elif int(rate_limit_remaining
-                     ) < RATE_LIMIT_HANDLING_THRESHOLDS['DELAYED_RESPONSE']:
-                policy = 'DELAYED_RESPONSE'
-            if active_rate_limit_handling_policy != policy and not (
-                    policy == 'DEFAULT' and not active_rate_limit_handling_policy):
+        policy_threshold = None
+        if not execution_params.get('is_recursed') and rate_limit_remaining:
+            current_ratio = int(rate_limit_remaining) / float(rate_limit_total)
+            for tmp_policy, tmp_threshold in RATE_LIMIT_HANDLING_THRESHOLDS:
+                if (tmp_threshold < 1
+                        and current_ratio <
+                        tmp_threshold) or (
+                            tmp_threshold > 1
+                            and int(rate_limit_remaining) < tmp_threshold):
+                    policy = tmp_policy
+                    policy_threshold = tmp_threshold
+                    break
+            if execution_params.get('active_rate_limit_handling_policy') != policy and not (
+                    policy == 'DEFAULT'
+                    and not execution_params.get('active_rate_limit_handling_policy')):
                 logger.warning(
-                    'Applying %s policy after checking remaining rate-limit against the threshold value (%s vs %s)'
+                    'Applying %s policy after checking remaining rate-limit against the threshold value (%s/%s=%s vs %s)'
                     % (policy,
                        rate_limit_remaining,
-                       RATE_LIMIT_HANDLING_THRESHOLDS.get(policy)))
-                active_rate_limit_handling_policy = policy
+                       rate_limit_total,
+                           int(rate_limit_remaining) / int(rate_limit_total),
+                       policy_threshold))
+                execution_params['active_rate_limit_handling_policy'] = policy
             if policy == 'DELAYED_RESPONSE':
                 sleep(DELAY_RESPONSES_BY_SECONDS)
             elif policy == 'REJECT_REQUESTS':
@@ -348,10 +371,11 @@ def fetch_data(freshdesk_request_session,
                     raise RuntimeError(
                         'Request rejected. Rate-limit reamining is less then the THRESHOLD_REJECT_REQUESTS'
                     )
-        return policy
+        return
 
     base_url = FRESHDESK_URL_ROOT + path
     base_url_next_page = base_url
+    update_execution_params(path, freshdesk_req_params, execution_params)
     page_counter = 0
     total_enties = 0
     uri_template, freshdesk_resource_id = get_uri_template(path)
@@ -368,11 +392,10 @@ def fetch_data(freshdesk_request_session,
                                               None)
             if freshdesk_response.status_code != 200:
                 raise AssertionError(freshdesk_response.text)
-            active_rate_limit_handling_policy = check_rate_limit(
-                is_recursed,
+            check_rate_limit(
                 freshdesk_response.headers.get('X-Ratelimit-Remaining'),
-                active_rate_limit_handling_policy,
-                is_full_scan)
+                freshdesk_response.headers.get('X-Ratelimit-Total'),
+                execution_params)
             response_json = freshdesk_response.json()
             # search calls return entites in 'results' property
             if 'search/' in uri_template:
@@ -408,25 +431,26 @@ def fetch_data(freshdesk_request_session,
                                         uri_template))
 
             # fetch underlying entity types for the resultset
-            for uri_hierarchy in FRESHDESK_HIERARCHY_URI_CONFIG:
-                if uri_template in uri_hierarchy.get('parent_uri_template'):
-                    for child_config in uri_hierarchy.get('children_config'):
-                        for entity in paged_entities:
-                            uri = re.sub(
-                                r'_id_',
-                                str(entity.get('id')),
-                                child_config.get('child_uri_template'))
-                            children_objects = ''
-                            for child in fetch_data(
-                                    freshdesk_request_session,
-                                    uri,
-                                {'per_page': FRESHDESK_MAX_PAGE_SIZE},
-                                    True,
-                                    is_full_scan):
-                                children_objects += child
-                            entity[child_config.get(
-                                'target_property')] = json.loads(
-                                    children_objects)
+            if execution_params.get('is_hierarchy_on'):
+                for uri_hierarchy in FRESHDESK_HIERARCHY_URI_CONFIG:
+                    if uri_template in uri_hierarchy.get('parent_uri_template'):
+                        for child_config in uri_hierarchy.get('children_config'):
+                            for entity in paged_entities:
+                                uri = re.sub(
+                                    r'_id_',
+                                    str(entity.get('id')),
+                                    child_config.get('child_uri_template'))
+                                children_objects = ''
+                                execution_params['is_recursed'] = True
+                                for child in fetch_data(
+                                        freshdesk_request_session,
+                                        uri,
+                                    {'per_page': FRESHDESK_MAX_PAGE_SIZE},
+                                        execution_params):
+                                    children_objects += child
+                                entity[child_config.get(
+                                    'target_property')] = json.loads(
+                                        children_objects)
             total_enties += len(paged_entities)
             for data in paged_entities:
                 if not is_first_yield:
@@ -434,11 +458,19 @@ def fetch_data(freshdesk_request_session,
                 else:
                     is_first_yield = False
                 yield json.dumps(data)
-            active_rate_limit_handling_policy = check_rate_limit(
-                is_recursed,
+            check_rate_limit(
                 freshdesk_response.headers.get('X-Ratelimit-Remaining'),
-                active_rate_limit_handling_policy,
-                is_full_scan)
+                freshdesk_response.headers.get('X-Ratelimit-Total'),execution_params)
+
+            # reach the end, extend as per configuration
+            if not base_url_next_page and execution_params.get('is_extension_on'):
+                extension_list = FRESHDESK_REQUEST_EXTENSION_CONFIG.get(path)
+                if extension_list and execution_params['extension_index'] < len(extension_list):
+                    extension = extension_list[execution_params['extension_index']]
+                    execution_params['extension_index'] = execution_params['extension_index'] + 1
+                    freshdesk_req_params[extension['param_name']] = extension['param_value']
+                    execution_params['is_hierarchy_on'] = extension.get('is_hierarchy_on', False)
+                    base_url_next_page = base_url
 
     except StopIteration:
         None
@@ -460,7 +492,7 @@ def get_freshdesk_session():
 @app.route('/<path:path>', methods=['GET'])
 def get(path):
     try:
-        freshdesk_req_params, is_full_scan = get_freshdesk_req_params(
+        freshdesk_req_params, execution_params = get_params(
             path,
             request.args.to_dict(True))
         with get_freshdesk_session() as freshdesk_request_session:
@@ -468,8 +500,7 @@ def get(path):
                 response=fetch_data(freshdesk_request_session,
                                     path,
                                     freshdesk_req_params,
-                                    False,
-                                    is_full_scan),
+                                    execution_params),
                 content_type='application/json; charset=utf-8')
     except Exception as err:
         log_exception()
@@ -486,7 +517,7 @@ def get(path):
 def push(path):
     try:
         base_url = FRESHDESK_URL_ROOT + path
-        freshdesk_req_params, is_full_scan = get_freshdesk_req_params(
+        freshdesk_req_params, is_full_scan = get_params(
             base_url,
             request.args.to_dict(True))
         with get_freshdesk_session() as freshdesk_request_session:
