@@ -365,7 +365,7 @@ def fetch_data(freshdesk_request_session,
             if policy == 'DELAYED_RESPONSE':
                 sleep(DELAY_RESPONSES_BY_SECONDS)
             elif policy == 'REJECT_REQUESTS':
-                if path in SINCE_SUPPORT_CONFIG and not is_full_scan:
+                if path in SINCE_SUPPORT_CONFIG and not execution_params['is_full_scan']:
                     raise StopIteration
                 else:
                     raise RuntimeError(
