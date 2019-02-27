@@ -126,12 +126,6 @@ FRESHDESK_HIERARCHY_URI_CONFIG = [
     }
 ]
 
-# extension mechanism extends result set so that objects that are not returned when asked for "All" are also included
-# At the moment extension works on a single parameter per path
-FRESHDESK_REQUEST_EXTENSION_CONFIG = {
-    'tickets': [{'param_name':'filter', 'param_value':'spam'}, { 'param_name':'filter', 'param_value': 'deleted'}],
-    'contacts': [{'param_name':'state', 'param_value':'deleted'}, {'param_name':'state', 'param_value': 'blocked'}]
-}
 
 # fd_param, operator, full_load_since_value fields are defined either to overcome
 # or to make full runs for search/XXX path valid
@@ -291,10 +285,14 @@ def call_service(freshdesk_request_session, method, url, params, json_data):
         json=json_data)
     # status code 429 is returned when rate-limit is achived, and returns retry-after value
     if freshdesk_response.status_code in [429]:
+        seconds_multiplier = 1
         if freshdesk_response.headers.get('Retry-After') is not None:
             retry_after = freshdesk_response.headers.get('Retry-After')
+            if retry_after[-4:] == " min":
+                retry_after = retry_after[:-4]
+                seconds_multiplier = 60
         logger.error('sleeping for %s seconds', retry_after)
-        sleep(float(retry_after))
+        sleep(float(retry_after)*seconds_multiplier)
     elif (method, freshdesk_response.status_code) not in VALID_RESPONSE_COMBOS:
         logger.error(
             'Unexpected response status code=%d, request-ID=%s, response text=%s'
@@ -325,15 +323,12 @@ def fetch_data(freshdesk_request_session,
                 execution_params):
 
 
-    def update_execution_params(path, freshdesk_req_params, execution_params):
-        execution_params['extension_index'] = 0
-        for extension in FRESHDESK_REQUEST_EXTENSION_CONFIG.get(path, []):
-            if freshdesk_req_params.get(extension['param_name']) == extension['param_value']:
-                execution_params['is_extension_on'] = False
-                execution_params['is_hierarchy_on'] = extension.get('is_hierarchy_on', False)
-                return
-        execution_params['is_extension_on'] = True
-        execution_params['is_hierarchy_on'] = True
+    def update_execution_params(freshdesk_req_params, execution_params):
+        execution_params['is_hierarchy_on'] = freshdesk_req_params.get(
+            'filter',
+            '').lower() not in ['deleted',
+                                'spam']
+
 
     def check_rate_limit(rate_limit_remaining,
                          rate_limit_total,
@@ -375,7 +370,7 @@ def fetch_data(freshdesk_request_session,
 
     base_url = FRESHDESK_URL_ROOT + path
     base_url_next_page = base_url
-    update_execution_params(path, freshdesk_req_params, execution_params)
+    update_execution_params(freshdesk_req_params, execution_params)
     page_counter = 0
     total_enties = 0
     uri_template, freshdesk_resource_id = get_uri_template(path)
@@ -461,16 +456,6 @@ def fetch_data(freshdesk_request_session,
             check_rate_limit(
                 freshdesk_response.headers.get('X-Ratelimit-Remaining'),
                 freshdesk_response.headers.get('X-Ratelimit-Total'),execution_params)
-
-            # reach the end, extend as per configuration
-            if not base_url_next_page and execution_params.get('is_extension_on'):
-                extension_list = FRESHDESK_REQUEST_EXTENSION_CONFIG.get(path)
-                if extension_list and execution_params['extension_index'] < len(extension_list):
-                    extension = extension_list[execution_params['extension_index']]
-                    execution_params['extension_index'] = execution_params['extension_index'] + 1
-                    freshdesk_req_params[extension['param_name']] = extension['param_value']
-                    execution_params['is_hierarchy_on'] = extension.get('is_hierarchy_on', False)
-                    base_url_next_page = base_url
 
     except StopIteration:
         None
