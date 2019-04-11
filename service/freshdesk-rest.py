@@ -8,7 +8,8 @@ import sys
 import traceback
 import types
 from time import sleep
-from datetime import datetime, timedelta 
+from datetime import datetime, timedelta
+import cherrypy
 
 app = Flask(__name__)
 
@@ -539,8 +540,18 @@ def push(path):
 
 
 if __name__ == '__main__':
-    app.run(
-        debug=True,
-        host='0.0.0.0',
-        port=os.getenv('port',
-                       ENV_DEFAULTS.get('port')))
+
+    cherrypy.tree.graft(app, '/')
+
+    # Set the configuration of the web server to production mode
+    cherrypy.config.update({
+        'environment': 'production',
+        'engine.autoreload_on': False,
+        'log.screen': True,
+        'server.socket_port': int(os.environ.get("PORT", 5000)),
+        'server.socket_host': '0.0.0.0'
+    })
+
+    # Start the CherryPy WSGI web server
+    cherrypy.engine.start()
+    cherrypy.engine.block()
