@@ -110,6 +110,8 @@ Configuration Items are either of a number or string. Thus, '"' char must be esc
 | delay_responses_by_seconds | duration of delay in seconds when threshold_delayed_response reached | no | 60 |
 | sesam_url | sesam url e.g. _https://datahub-1426e5f8.sesam.cloud_  | no | n/a |
 | sesam_jwt | sesam_jwt for the sesam node | no | n/a |
+| seconds_to_shift_since_value_by | number of seconds to subtract from the submitted since value. Added due to that some updates are returned by the API | no | 0 |
+
 
 
 ##### example configuration in SESAM:
