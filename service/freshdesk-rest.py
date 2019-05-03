@@ -8,6 +8,8 @@ import sys
 import traceback
 import types
 from time import sleep
+from datetime import datetime, timedelta
+import cherrypy
 
 app = Flask(__name__)
 
@@ -61,6 +63,8 @@ FRESHDESK_FILTER_CALL_MAX_PAGE_NO = int(
 FRESHDESK_APIKEY = os.getenv('freshdesk_apikey')
 FRESHDESK_HEADERS = {'Content-Type': 'application/json'}
 FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
+
+SECONDS_TO_SHIFT_SINCE_VALUE_BY = int(os.getenv('seconds_to_shift_since_value_by',0))
 
 SESAM_URL = os.getenv('sesam_url', None)
 SESAM_JWT = os.getenv('sesam_jwt', None)
@@ -133,27 +137,32 @@ SINCE_SUPPORT_CONFIG = {
     'tickets': {
         'fd_param': 'updated_since',
         'operator': '=',
-        'full_load_since_value': '1970-01-01T00:00:00Z'
+        'full_load_since_value': '1970-01-01T00:00:00Z',
+        'datetime_format': '%Y-%m-%dT%H:%M:%SZ'
     },
     'contacts': {
         'fd_param': '_updated_since',
         'operator': '=',
-        'full_load_since_value': None
+        'full_load_since_value': None,
+        'datetime_format': '%Y-%m-%dT%H:%M:%SZ'
     },
     'surveys/satisfaction_ratings': {
         'fd_param': 'created_since',
         'operator': '=',
-        'full_load_since_value': '1970-01-01T00:00:00Z'
+        'full_load_since_value': '1970-01-01T00:00:00Z',
+        'datetime_format': '%Y-%m-%dT%H:%M:%SZ'
     },
     'search/companies': {
         'fd_param': 'updated_at',
         'operator': ':>',
-        'full_load_since_value': '1970-01-01'
+        'full_load_since_value': '1970-01-01',
+        'datetime_format': '%Y-%m-%d'
     },
     'search/contacts': {
         'fd_param': 'updated_at',
         'operator': ':>',
-        'full_load_since_value': '1970-01-01'
+        'full_load_since_value': '1970-01-01',
+        'datetime_format': '%Y-%m-%d'
     }
 }
 
@@ -241,28 +250,31 @@ def get_params(path, params):
                                FRESHDESK_MAX_PAGE_SIZE))))
 
     if uri_template in SINCE_SUPPORT_CONFIG:
+        config = SINCE_SUPPORT_CONFIG[uri_template]
         since_value = params.get('since')
         if since_value:
             execution_params['is_full_scan'] = False
+            if SECONDS_TO_SHIFT_SINCE_VALUE_BY > 0:
+                since_date = datetime.strptime(since_value, config['datetime_format'])
+                since_date = since_date - timedelta(seconds=SECONDS_TO_SHIFT_SINCE_VALUE_BY)
+                since_value = datetime.strftime(since_date,config['datetime_format'])
         else:
-            since_value = SINCE_SUPPORT_CONFIG[uri_template][
-                'full_load_since_value']
+            since_value=config['full_load_since_value']
         if since_value:
             if 'search/' in uri_template:
-                since_query_segment = SINCE_SUPPORT_CONFIG[uri_template]['fd_param'] + SINCE_SUPPORT_CONFIG[uri_template]['operator'] + '\'' + re.sub(
+                since_query_segment=config['fd_param'] + config['operator'] + '\'' + re.sub(
                     r'T.*',
                     r'',
                     since_value) + '\''
                 if params.get('query', None) is not None:
-                    params['query'] = '\"(' + params.get('query').replace(
+                    params['query']='\"(' + params.get('query').replace(
                         '\"',
                         '') + ') AND ' + since_query_segment + '\"'
                 else:
-                    params['query'] = '\"' + \
-                        since_query_segment + '\"'
+                    params['query']='\"' + since_query_segment + '\"'
             else:
-                params[SINCE_SUPPORT_CONFIG[uri_template][
-                    'fd_param']] = since_value
+                params[config['fd_param']]=since_value
+
 
     # delete params that are specific to SESAM Pull Protocal
     for param in ['limit', 'page_size', 'since']:
@@ -528,8 +540,18 @@ def push(path):
 
 
 if __name__ == '__main__':
-    app.run(
-        debug=True,
-        host='0.0.0.0',
-        port=os.getenv('port',
-                       ENV_DEFAULTS.get('port')))
+
+    cherrypy.tree.graft(app, '/')
+
+    # Set the configuration of the web server to production mode
+    cherrypy.config.update({
+        'environment': 'production',
+        'engine.autoreload_on': False,
+        'log.screen': True,
+        'server.socket_port': int(os.environ.get("PORT", 5000)),
+        'server.socket_host': '0.0.0.0'
+    })
+
+    # Start the CherryPy WSGI web server
+    cherrypy.engine.start()
+    cherrypy.engine.block()
