@@ -9,7 +9,7 @@ import traceback
 import types
 from time import sleep
 from datetime import datetime, timedelta
-import cherrypy
+import logger as log
 
 app = Flask(__name__)
 
@@ -43,14 +43,7 @@ ENV_DEFAULTS = {
     'delay_responses_by_seconds':
         60
 }
-# Log to stdout
-format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-logger = logging.getLogger('freshdesk-rest-service')
-stdout_handler = logging.StreamHandler()
-stdout_handler.setFormatter(logging.Formatter(format_string))
-logger.addHandler(stdout_handler)
-logger.setLevel(os.getenv('logging_level', ENV_DEFAULTS.get('logging_level')))
-
+logger = log.init_logger('freshdesk-rest-service', os.getenv('logging_level', ENV_DEFAULTS.get('logging_level')))
 FRESHDESK_DOMAIN = os.getenv('freshdesk_domain')
 FRESHDESK_API_PATH = os.getenv('freshdesk_api_path',
                                ENV_DEFAULTS.get('freshdesk_api_path'))
@@ -476,7 +469,7 @@ def fetch_data(freshdesk_request_session,
         yield '500 - encountered error'
     finally:
         yield ']'
-    logger.info('returning %s entities' % total_enties)
+    logger.debug('returning %s entities' % total_enties)
 
 
 def get_freshdesk_session():
@@ -540,18 +533,24 @@ def push(path):
 
 
 if __name__ == '__main__':
+    if os.environ.get('WEBFRAMEWORK', '').lower() == 'flask':
+        app.run(debug=True, host='0.0.0.0', port=int(
+            os.environ.get('PORT', 5000)))
+    else:
+        import cherrypy
 
-    cherrypy.tree.graft(app, '/')
+        app = log.add_access_logger(app, logger)
+        cherrypy.tree.graft(app, '/')
 
-    # Set the configuration of the web server to production mode
-    cherrypy.config.update({
-        'environment': 'production',
-        'engine.autoreload_on': False,
-        'log.screen': True,
-        'server.socket_port': int(os.environ.get("PORT", 5000)),
-        'server.socket_host': '0.0.0.0'
-    })
+        # Set the configuration of the web server to production mode
+        cherrypy.config.update({
+            'environment': 'production',
+            'engine.autoreload_on': False,
+            'log.screen': True,
+            'server.socket_port': int(os.environ.get("PORT", 5000)),
+            'server.socket_host': '0.0.0.0'
+        })
 
-    # Start the CherryPy WSGI web server
-    cherrypy.engine.start()
-    cherrypy.engine.block()
+        # Start the CherryPy WSGI web server
+        cherrypy.engine.start()
+        cherrypy.engine.block()

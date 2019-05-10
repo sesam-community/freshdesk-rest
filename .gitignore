@@ -1,4 +1,4 @@
 service/venv
 service/test
-service/envlist*
-service/env.list*
+service/env*list*
+__pycache__

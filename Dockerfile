@@ -1,6 +1,6 @@
 FROM python:3-alpine
 LABEL maintainer="Egemen Yavuz <melih.egemen.yavuz@sysco.no>"
-COPY ./service/freshdesk-rest.py /service/freshdesk-rest.py
+COPY ./service/*.py /service/
 COPY ./service/requirements.txt /service/requirements.txt
 
 RUN pip install --upgrade pip
