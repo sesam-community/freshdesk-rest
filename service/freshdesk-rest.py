@@ -43,7 +43,8 @@ ENV_DEFAULTS = {
     'delay_responses_by_seconds':
         60
 }
-logger = log.init_logger('freshdesk-rest-service', os.getenv('logging_level', ENV_DEFAULTS.get('logging_level')))
+logger = log.init_logger('freshdesk-rest-service',
+                         os.getenv('logging_level', ENV_DEFAULTS.get('logging_level')))
 FRESHDESK_DOMAIN = os.getenv('freshdesk_domain')
 FRESHDESK_API_PATH = os.getenv('freshdesk_api_path',
                                ENV_DEFAULTS.get('freshdesk_api_path'))
@@ -57,7 +58,8 @@ FRESHDESK_APIKEY = os.getenv('freshdesk_apikey')
 FRESHDESK_HEADERS = {'Content-Type': 'application/json'}
 FRESHDESK_URL_ROOT = str(FRESHDESK_DOMAIN) + str(FRESHDESK_API_PATH)
 
-SECONDS_TO_SHIFT_SINCE_VALUE_BY = int(os.getenv('seconds_to_shift_since_value_by',0))
+SECONDS_TO_SHIFT_SINCE_VALUE_BY = int(
+    os.getenv('seconds_to_shift_since_value_by', 0))
 
 SESAM_URL = os.getenv('sesam_url', None)
 SESAM_JWT = os.getenv('sesam_jwt', None)
@@ -231,7 +233,8 @@ def sesam_callback(method, config, resource_id, json_data, uri_template):
 
 
 def get_params(path, params):
-    execution_params = {'is_full_scan' : True, 'is_recursed': False, 'active_rate_limit_handling_policy' : None}
+    execution_params = {'is_full_scan': True, 'is_recursed': False,
+                        'active_rate_limit_handling_policy': None}
     uri_template, freshdesk_resource_id = get_uri_template(path)
     if 'search/' not in uri_template and '_id_' not in uri_template:
         params.setdefault(
@@ -248,26 +251,28 @@ def get_params(path, params):
         if since_value:
             execution_params['is_full_scan'] = False
             if SECONDS_TO_SHIFT_SINCE_VALUE_BY > 0:
-                since_date = datetime.strptime(since_value, config['datetime_format'])
-                since_date = since_date - timedelta(seconds=SECONDS_TO_SHIFT_SINCE_VALUE_BY)
-                since_value = datetime.strftime(since_date,config['datetime_format'])
+                since_date = datetime.strptime(
+                    since_value, config['datetime_format'])
+                since_date = since_date - \
+                    timedelta(seconds=SECONDS_TO_SHIFT_SINCE_VALUE_BY)
+                since_value = datetime.strftime(
+                    since_date, config['datetime_format'])
         else:
-            since_value=config['full_load_since_value']
+            since_value = config['full_load_since_value']
         if since_value:
             if 'search/' in uri_template:
-                since_query_segment=config['fd_param'] + config['operator'] + '\'' + re.sub(
+                since_query_segment = config['fd_param'] + config['operator'] + '\'' + re.sub(
                     r'T.*',
                     r'',
                     since_value) + '\''
                 if params.get('query', None) is not None:
-                    params['query']='\"(' + params.get('query').replace(
+                    params['query'] = '\"(' + params.get('query').replace(
                         '\"',
                         '') + ') AND ' + since_query_segment + '\"'
                 else:
-                    params['query']='\"' + since_query_segment + '\"'
+                    params['query'] = '\"' + since_query_segment + '\"'
             else:
-                params[config['fd_param']]=since_value
-
+                params[config['fd_param']] = since_value
 
     # delete params that are specific to SESAM Pull Protocal
     for param in ['limit', 'page_size', 'since']:
@@ -276,41 +281,46 @@ def get_params(path, params):
     return params, execution_params
 
 
-def call_service(freshdesk_request_session, method, url, params, json_data):
+def call_service(session, method, url, params, json_data):
     logger.debug(
         'Issuing a %s call with url=%s, with param list=%s, headers=%s',
         method,
         url,
         params,
-        FRESHDESK_HEADERS)
-    freshdesk_response = freshdesk_request_session.request(
+        session.headers)
+    response = session.request(
         method=method,
         url=url,
         params=params,
         json=json_data)
+
+    if (method, response.status_code) not in VALID_RESPONSE_COMBOS:
+        logger.warning(
+            'Unexpected response status code=%d, url=%s, method=%s, params=%s, request-ID=%s, response text=%s'
+            % (response.status_code,
+                url,
+                method,
+                params,
+               response.headers.get('X-Request-Id'),
+               response.text))
+
     # status code 429 is returned when rate-limit is achived, and returns retry-after value
-    if freshdesk_response.status_code in [429]:
+    if response.status_code in [429]:
         seconds_multiplier = 1
-        if freshdesk_response.headers.get('Retry-After') is not None:
-            retry_after = freshdesk_response.headers.get('Retry-After')
+        if response.headers.get('Retry-After') is not None:
+            retry_after = response.headers.get('Retry-After')
             if retry_after[-4:] == " min":
                 retry_after = retry_after[:-4]
                 seconds_multiplier = 60
-        logger.error('sleeping for %s seconds', retry_after)
-        sleep(float(retry_after)*seconds_multiplier)
-    elif (method, freshdesk_response.status_code) not in VALID_RESPONSE_COMBOS:
-        logger.error(
-            'Unexpected response status code=%d, request-ID=%s, response text=%s'
-            % (freshdesk_response.status_code,
-               freshdesk_response.headers.get('X-Request-Id'),
-               freshdesk_response.text))
+        logger.warning('sleeping for %s seconds', retry_after)
+        sleep(float(retry_after) * seconds_multiplier)
 
     elif method in ['PUT', 'POST', 'DELETE']:
         uri_template, freshdesk_resource_id = get_uri_template(
             url.replace(FRESHDESK_URL_ROOT, ''))
         json_data_to_sesam = {}
         if method != 'DELETE':
-            json_data_to_sesam = freshdesk_response.json()
+            json_data_to_sesam = response.json()
         for callback_config in SESAM_CALLBACK_CONFIG:
             if uri_template in callback_config['uri_templates']:
                 sesam_callback(method,
@@ -318,22 +328,20 @@ def call_service(freshdesk_request_session, method, url, params, json_data):
                                freshdesk_resource_id,
                                json_data_to_sesam,
                                uri_template)
-    return freshdesk_response
+    return response
 
 
 # streams data for any GET request, supports pagination
 def fetch_data(freshdesk_request_session,
                path,
                freshdesk_req_params,
-                execution_params):
-
+               execution_params):
 
     def update_execution_params(freshdesk_req_params, execution_params):
         execution_params['is_hierarchy_on'] = freshdesk_req_params.get(
             'filter',
             '').lower() not in ['deleted',
                                 'spam']
-
 
     def check_rate_limit(rate_limit_remaining,
                          rate_limit_total,
@@ -359,7 +367,7 @@ def fetch_data(freshdesk_request_session,
                     % (policy,
                        rate_limit_remaining,
                        rate_limit_total,
-                           int(rate_limit_remaining) / int(rate_limit_total),
+                       int(rate_limit_remaining) / int(rate_limit_total),
                        policy_threshold))
                 execution_params['active_rate_limit_handling_policy'] = policy
             if policy == 'DELAYED_RESPONSE':
@@ -460,7 +468,7 @@ def fetch_data(freshdesk_request_session,
                 yield json.dumps(data)
             check_rate_limit(
                 freshdesk_response.headers.get('X-Ratelimit-Remaining'),
-                freshdesk_response.headers.get('X-Ratelimit-Total'),execution_params)
+                freshdesk_response.headers.get('X-Ratelimit-Total'), execution_params)
 
     except StopIteration:
         None
@@ -472,11 +480,21 @@ def fetch_data(freshdesk_request_session,
     logger.debug('returning %s entities' % total_enties)
 
 
-def get_freshdesk_session():
+def get_session(domain='freshdesk'):
     session = requests.Session()
-    session.auth = (FRESHDESK_APIKEY, 'X')
-    session.headers = FRESHDESK_HEADERS
+    if domain == 'freshdesk':
+        session.auth = (FRESHDESK_APIKEY, 'X')
+        session.headers = FRESHDESK_HEADERS
     return session
+
+
+def create_response(msg_text, status_code, content_type='application/json; charset=utf-8'):
+    return Response(
+        response=json.dumps({
+            'message': msg_text
+        }),
+        status=status_code,
+        content_type=content_type)
 
 
 @app.route('/<path:path>', methods=['GET'])
@@ -485,7 +503,7 @@ def get(path):
         freshdesk_req_params, execution_params = get_params(
             path,
             request.args.to_dict(True))
-        with get_freshdesk_session() as freshdesk_request_session:
+        with get_session() as freshdesk_request_session:
             return Response(
                 response=fetch_data(freshdesk_request_session,
                                     path,
@@ -494,13 +512,7 @@ def get(path):
                 content_type='application/json; charset=utf-8')
     except Exception as err:
         log_exception()
-        return Response(
-            response=json.dumps({
-                'message': str(err)
-            }),
-            status=500,
-            mimetype='application/json',
-            content_type='application/json; charset=utf-8')
+        return create_response(str(err), 500)
 
 
 @app.route('/<path:path>', methods=['POST', 'PUT', 'DELETE'])
@@ -510,7 +522,7 @@ def push(path):
         freshdesk_req_params, is_full_scan = get_params(
             base_url,
             request.args.to_dict(True))
-        with get_freshdesk_session() as freshdesk_request_session:
+        with get_session() as freshdesk_request_session:
             freshdesk_response = call_service(freshdesk_request_session,
                                               request.method,
                                               base_url,
@@ -523,13 +535,84 @@ def push(path):
             content_type='application/json; charset=utf-8')
     except Exception as err:
         log_exception()
-        return Response(
-            response=json.dumps({
-                'message': str(err)
-            }),
-            status=500,
-            mimetype='application/json',
-            content_type='application/json; charset=utf-8')
+        return create_response(str(err), 500)
+
+
+@app.route('/export/ticket_activities', methods=['GET'])
+def get_scheduled_report():
+    datetime_format = '%Y-%m-%d'
+
+    def stream_export_data(session, method, export_sources):
+        yield '['
+        try:
+            is_first_yield = True
+
+            def sesamify(entity):
+                performed_at_date = datetime.strptime(entity.get('performed_at'),'%d-%m-%Y %H:%M:%S %z')
+                performed_at_str = datetime.strftime(performed_at_date, datetime_format)
+                entity['_updated'] = performed_at_str
+                return entity
+
+            for export_source in export_sources:
+                export_response = call_service(session,
+                                               request.method,
+                                               export_source.get('url'),
+                                               None,
+                                               None)
+                if export_response.status_code == 200:
+                    response_data = export_response.json()
+                    response_data = response_data.get('activities_data')
+                    for activity in response_data:
+                        if not is_first_yield:
+                            yield ','
+                        else:
+                            is_first_yield = False
+                        yield json.dumps(sesamify(activity))
+
+                else:
+                    logger.warning(export_response)
+        finally:
+            yield ']'
+
+    try:
+        since_str = request.args.get('since', '')
+        params_list = []
+        export_sources = []
+        if since_str:
+            try:
+                one_day = timedelta(days=1)
+                start_date = datetime.strptime(since_str, datetime_format)
+                while start_date < datetime.today() - one_day:
+                    params_list.append(
+                        {'created_at': datetime.strftime(start_date, datetime_format)})
+                    start_date = start_date + one_day
+            except Exception as err:
+                logger.exception(err)
+                return create_response('value for the since parameter must be in yyyy-mm-dd format', 400)
+        else:
+            params_list = [{}]
+
+        ticket_activities_url = FRESHDESK_URL_ROOT + 'export/ticket_activities'
+        with get_session() as freshdesk_request_session:
+            for params in params_list:
+                freshdesk_response = call_service(freshdesk_request_session,
+                                                  request.method,
+                                                  ticket_activities_url,
+                                                  params,
+                                                  None)
+                if freshdesk_response.status_code == 200:
+                    export_sources.extend(
+                        freshdesk_response.json().get('export'))
+
+        with get_session(None) as session:
+            return Response(
+                stream_with_context(stream_export_data(session,
+                                                       request.method,
+                                                       export_sources)))
+
+    except Exception as err:
+        log_exception()
+        return create_response(str(err), 500)
 
 
 if __name__ == '__main__':
