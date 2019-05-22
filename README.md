@@ -12,6 +12,7 @@ This microservice can be used for [Sesam](https://docs.sesam.io/index.html) and 
 * GET, PUT, POST, DELETE requests
 * _id and _updated property generation in GET requests
 * optional sesam callback feature for PUT/POST/DELETE requests. requires both _sesam_url_ and _sesam_node_ to be set
+* ticket_activities scheduled report retrieval via path '/export/ticket_activities'
 
 
 Limitations
