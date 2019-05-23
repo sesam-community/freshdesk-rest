@@ -559,7 +559,10 @@ def get_scheduled_report():
                     created_at_str = datetime.strftime(created_at_date, datetime_format)
                     response_data['_updated'] = created_at_str
                     response_data['_id'] = created_at_str
-
+                    if not is_first_yield:
+                        yield ','
+                    else:
+                        is_first_yield = False
                     yield json.dumps(response_data)
 
                 else:
