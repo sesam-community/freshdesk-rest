@@ -547,12 +547,6 @@ def get_scheduled_report():
         try:
             is_first_yield = True
 
-            def sesamify(entity):
-                performed_at_date = datetime.strptime(entity.get('performed_at'),'%d-%m-%Y %H:%M:%S %z')
-                performed_at_str = datetime.strftime(performed_at_date, datetime_format)
-                entity['_updated'] = performed_at_str
-                return entity
-
             for export_source in export_sources:
                 export_response = call_service(session,
                                                request.method,
@@ -561,13 +555,12 @@ def get_scheduled_report():
                                                None)
                 if export_response.status_code == 200:
                     response_data = export_response.json()
-                    response_data = response_data.get('activities_data')
-                    for activity in response_data:
-                        if not is_first_yield:
-                            yield ','
-                        else:
-                            is_first_yield = False
-                        yield json.dumps(sesamify(activity))
+                    created_at_date = datetime.strptime(export_source.get('created_at'),'%d-%m-%Y')
+                    created_at_str = datetime.strftime(created_at_date, datetime_format)
+                    response_data['_updated'] = created_at_str
+                    response_data['_id'] = created_at_str
+
+                    yield json.dumps(response_data)
 
                 else:
                     logger.warning(export_response)
